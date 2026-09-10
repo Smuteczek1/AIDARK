@@ -21,6 +21,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
+const GEMINI_MAX_OUTPUT_TOKENS = parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS, 10) || 16384;
 
 // Supabase jest opcjonalne — jeśli zmienne nie są ustawione albo są niepoprawne,
 // endpointy związane z bazą zwrócą czytelny błąd zamiast wywalać cały serwer
@@ -213,9 +214,14 @@ app.post('/api/chat', asyncRoute(async (req, res) => {
         systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined,
         safetySettings: SAFETY_SETTINGS,
         generationConfig: {
-          maxOutputTokens: 8192,
+          maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
           responseMimeType: 'application/json',
           responseSchema: RESPONSE_SCHEMA,
+          // Gemini 3 domyślnie zużywa dużą część limitu tokenów na wewnętrzne
+          // "myślenie" (liczone jako tokeny wyjściowe!). To zadanie to głównie
+          // ekstrakcja danych + zwięzła odpowiedź — nie potrzebuje głębokiego
+          // rozumowania, więc ograniczamy je, żeby zostawić miejsce na treść.
+          thinkingConfig: { thinkingLevel: 'low' },
         },
       }),
     });
