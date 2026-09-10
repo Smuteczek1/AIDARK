@@ -137,6 +137,38 @@
   .entity-form .form-row{display:flex; gap:8px;}
   .entity-form .form-row > div{flex:1;}
   .entity-form .form-actions{display:flex; gap:10px; margin-top:4px;}
+
+  .sidebar-tabs{ display:flex; border-bottom:1px solid var(--border); flex-shrink:0; }
+  .tab-btn{ flex:1; background:transparent; border:none; color:var(--text-muted); font-family:var(--font-mono);
+    font-size:11.5px; text-transform:uppercase; letter-spacing:.4px; padding:13px 0; cursor:pointer;
+    border-bottom:2px solid transparent; transition:color .15s, border-color .15s; }
+  .tab-btn:hover{color:var(--text);}
+  .tab-btn.active{ color:var(--accent); border-bottom-color:var(--accent); }
+  .sidebar-panel{ display:flex; flex-direction:column; min-height:0; flex:1; }
+
+  #documentTree{ flex:1; overflow-y:auto; padding:10px 16px 20px; }
+  .doc-node{ margin-bottom:2px; }
+  .doc-row{ display:flex; align-items:center; gap:7px; padding:8px 6px; border-radius:3px; cursor:pointer; }
+  .doc-row:hover{ background:var(--panel-alt); }
+  .doc-row .arrow{ font-family:var(--font-mono); font-size:10px; color:var(--text-faint); width:10px;
+    display:inline-block; text-align:center; transition:transform .15s; }
+  .doc-row.collapsed .arrow{ transform:rotate(-90deg); }
+  .doc-row .title{ flex:1; font-family:var(--font-serif); font-size:13.5px; color:var(--text);
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .doc-row .doc-actions{ display:none; gap:10px; flex-shrink:0; }
+  .doc-row:hover .doc-actions{ display:flex; }
+  .doc-row .doc-actions button{ background:transparent; border:none; color:var(--text-faint);
+    font-family:var(--font-mono); font-size:10px; cursor:pointer; padding:2px; }
+  .doc-row .doc-actions button:hover{ color:var(--accent); }
+  .doc-row .doc-actions button.danger:hover{ color:var(--danger); }
+  .doc-children{ margin-left:15px; border-left:1px solid var(--border-soft); padding-left:7px; }
+  .doc-editor{ border:1px solid var(--accent-dim); border-radius:4px; padding:12px; background:var(--panel-raised);
+    margin:6px 0; display:flex; flex-direction:column; gap:8px; }
+  .doc-editor input, .doc-editor textarea{ width:100%; background:var(--bg); border:1px solid var(--border);
+    color:var(--text); font-family:var(--font-serif); font-size:13.5px; padding:7px 9px; border-radius:3px; }
+  .doc-editor textarea{ min-height:130px; resize:vertical; line-height:1.6; }
+  .doc-editor input:focus, .doc-editor textarea:focus{ outline:none; border-color:var(--accent-dim); }
+  .doc-editor .form-actions{ display:flex; gap:10px; }
 </style>
 </head>
 <body>
@@ -170,15 +202,34 @@
 
   <div id="sidebarBackdrop"></div>
   <aside id="sidebar">
-    <div class="sidebar-head">
-      <div class="row1">
-        <h2>Baza jednostek <span class="count" id="entityCount">0</span></h2>
-        <button class="primary" id="addEntityBtn">+ Nowa</button>
-      </div>
-      <input type="text" id="entitySearch" placeholder="szukaj po nazwie, kategorii, powiązaniach…">
+    <div class="sidebar-tabs">
+      <button class="tab-btn active" id="tabEntitiesBtn">Jednostki</button>
+      <button class="tab-btn" id="tabDocumentsBtn">Dokumenty</button>
     </div>
-    <div id="entityList">
-      <div class="entity-empty" id="entityEmpty">Baza jest jeszcze pusta. W miarę jak pojawiają się nowe jednostki, korporacje albo anomalie, będą tu zapisywane — albo dodaj pierwszą ręcznie.</div>
+
+    <div id="entitiesPanel" class="sidebar-panel">
+      <div class="sidebar-head">
+        <div class="row1">
+          <h2>Baza jednostek <span class="count" id="entityCount">0</span></h2>
+          <button class="primary" id="addEntityBtn">+ Nowa</button>
+        </div>
+        <input type="text" id="entitySearch" placeholder="szukaj po nazwie, kategorii, powiązaniach…">
+      </div>
+      <div id="entityList">
+        <div class="entity-empty" id="entityEmpty">Baza jest jeszcze pusta. W miarę jak pojawiają się nowe jednostki, korporacje albo anomalie, będą tu zapisywane — albo dodaj pierwszą ręcznie.</div>
+      </div>
+    </div>
+
+    <div id="documentsPanel" class="sidebar-panel" style="display:none;">
+      <div class="sidebar-head">
+        <div class="row1">
+          <h2>Dokumenty</h2>
+          <button class="primary" id="addRootDocBtn">+ Nowy</button>
+        </div>
+      </div>
+      <div id="documentTree">
+        <div class="entity-empty" id="documentEmpty">Brak dokumentów. Dodaj pierwszy — może być folderem, jeśli dodasz do niego poddokumenty.</div>
+      </div>
     </div>
   </aside>
 </div>
@@ -189,9 +240,12 @@
 
   const CATEGORIES = ['Korporacja','Jednostka / Wydział','Frakcja','Postać','Anomalia','Miejsce','Wydarzenie','Inne'];
 
-  let state = { messages: [], entities: {} };
+  let state = { messages: [], entities: {}, documents: [] };
   let collapsedCategories = {};
   let editingKey = null;
+  let editingDocId = null;
+  let newDocParent; // undefined = brak formularza; null = nowy element główny; id = poddokument
+  let collapsedDocs = {};
 
   const chatEl = document.getElementById('chat');
   const emptyState = document.getElementById('emptyState');
@@ -205,6 +259,30 @@
   const sidebarBackdrop = document.getElementById('sidebarBackdrop');
   const resetBtn = document.getElementById('resetBtn');
   const addEntityBtn = document.getElementById('addEntityBtn');
+  const tabEntitiesBtn = document.getElementById('tabEntitiesBtn');
+  const tabDocumentsBtn = document.getElementById('tabDocumentsBtn');
+  const entitiesPanel = document.getElementById('entitiesPanel');
+  const documentsPanel = document.getElementById('documentsPanel');
+  const documentTreeEl = document.getElementById('documentTree');
+  const documentEmptyEl = document.getElementById('documentEmpty');
+  const addRootDocBtn = document.getElementById('addRootDocBtn');
+
+  tabEntitiesBtn.addEventListener('click', () => switchSidebarTab('entities'));
+  tabDocumentsBtn.addEventListener('click', () => switchSidebarTab('documents'));
+
+  function switchSidebarTab(tab){
+    const isEnt = tab === 'entities';
+    tabEntitiesBtn.classList.toggle('active', isEnt);
+    tabDocumentsBtn.classList.toggle('active', !isEnt);
+    entitiesPanel.style.display = isEnt ? 'flex' : 'none';
+    documentsPanel.style.display = isEnt ? 'none' : 'flex';
+  }
+
+  addRootDocBtn.addEventListener('click', () => {
+    newDocParent = null;
+    editingDocId = null;
+    renderDocuments();
+  });
 
   function escapeHtml(str){
     const d = document.createElement('div');
@@ -238,34 +316,43 @@
     renderEntities();
   });
 
-  resetBtn.addEventListener('click', async ()=>{
-    if(!confirm('Na pewno wyczyścić całe archiwum — historię rozmowy i bazę jednostek? Tej operacji nie można cofnąć.')) return;
-    state = { messages: [], entities: {} };
-    editingKey = null;
+  resetBtn.addEventListener('click', ()=>{
+    if(!confirm('Wyczyścić lokalną historię TEJ rozmowy? Baza jednostek i dokumenty są wspólne i nie zostaną ruszone.')) return;
+    state.messages = [];
     renderChat();
-    renderEntities();
-    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){ console.error(e); }
+    persist();
   });
 
   function persist(){
-    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
-    catch(e){ console.error('Nie udało się zapisać stanu archiwum:', e); }
+    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify({ messages: state.messages })); }
+    catch(e){ console.error('Nie udało się zapisać historii czatu:', e); }
   }
 
-  function loadState(){
+  async function loadState(){
+    // Historia czatu — lokalnie, tylko w tej przeglądarce.
     try{
       const raw = localStorage.getItem(STORAGE_KEY);
       if(raw){
         const parsed = JSON.parse(raw);
-        if(parsed && typeof parsed === 'object'){
-          state.messages = Array.isArray(parsed.messages) ? parsed.messages : [];
-          state.entities = parsed.entities && typeof parsed.entities === 'object' ? parsed.entities : {};
-          Object.values(state.entities).forEach(e => { if(!e.kategoria && e.type) e.kategoria = e.type; });
-        }
+        if(parsed && Array.isArray(parsed.messages)) state.messages = parsed.messages;
       }
-    }catch(e){ /* brak zapisanego stanu */ }
+    }catch(e){ /* brak zapisanej historii */ }
     renderChat();
+
+    // Jednostki — wspólna baza w Supabase, przez backend.
+    try{
+      const res = await fetch('/api/entities');
+      if(res.ok){
+        const rows = await res.json();
+        state.entities = {};
+        rows.forEach(r => { state.entities[r.key] = r; });
+      } else {
+        console.error('Nie udało się wczytać bazy jednostek:', (await res.json()).error);
+      }
+    }catch(e){ console.error('Nie udało się wczytać bazy jednostek:', e); }
     renderEntities();
+
+    await loadDocuments();
   }
 
   function renderChat(){
@@ -331,7 +418,7 @@
     const form = container.querySelector('[data-form]');
     if(!form) return;
     form.addEventListener('click', (e) => e.stopPropagation());
-    form.querySelector('[data-action="save"]').addEventListener('click', () => {
+    form.querySelector('[data-action="save"]').addEventListener('click', async () => {
       const get = (f) => form.querySelector(`[data-field="${f}"]`).value.trim();
       const name = get('name');
       if(!name){ alert('Podaj nazwę jednostki.'); return; }
@@ -341,11 +428,28 @@
         powiazania: get('powiazania'), nadrzedna: get('nadrzedna')
       };
       const newKey = name.toLowerCase();
-      if(key !== '__new__' && key !== newKey) delete state.entities[key];
-      state.entities[newKey] = newEntity;
+      const saveBtn = form.querySelector('[data-action="save"]');
+      saveBtn.disabled = true;
+      try{
+        const res = await fetch('/api/entities', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newEntity)
+        });
+        if(!res.ok) throw new Error((await res.json()).error || 'Błąd zapisu.');
+        const saved = await res.json();
+        if(key !== '__new__' && key !== newKey){
+          await fetch('/api/entities/' + encodeURIComponent(key), { method: 'DELETE' });
+          delete state.entities[key];
+        }
+        state.entities[saved.key] = saved;
+      }catch(err){
+        alert('Nie udało się zapisać jednostki: ' + err.message);
+        saveBtn.disabled = false;
+        return;
+      }
       editingKey = null;
       renderEntities();
-      persist();
     });
     form.querySelector('[data-action="cancel"]').addEventListener('click', () => {
       editingKey = null;
@@ -445,12 +549,15 @@
         card.querySelector('[data-action="edit"]').addEventListener('click', (e2) => {
           e2.stopPropagation(); editingKey = key; renderEntities();
         });
-        card.querySelector('[data-action="delete"]').addEventListener('click', (e2) => {
+        card.querySelector('[data-action="delete"]').addEventListener('click', async (e2) => {
           e2.stopPropagation();
           if(!confirm(`Usunąć "${e.name}" z bazy?`)) return;
+          try{
+            const res = await fetch('/api/entities/' + encodeURIComponent(key), { method: 'DELETE' });
+            if(!res.ok) throw new Error((await res.json()).error || 'Błąd usuwania.');
+          }catch(err){ alert('Nie udało się usunąć: ' + err.message); return; }
           delete state.entities[key];
           renderEntities();
-          persist();
         });
         cardsWrap.appendChild(card);
       });
@@ -475,6 +582,174 @@
         powiazania: u.powiazania || existing.powiazania || '',
         nadrzedna: u.nadrzedna || existing.nadrzedna || ''
       };
+    });
+  }
+
+  async function loadDocuments(){
+    try{
+      const res = await fetch('/api/documents');
+      if(res.ok){
+        state.documents = await res.json();
+      } else {
+        console.error('Nie udało się wczytać dokumentów:', (await res.json()).error);
+        state.documents = [];
+      }
+    }catch(e){ console.error('Nie udało się wczytać dokumentów:', e); state.documents = []; }
+    renderDocuments();
+  }
+
+  function buildDocFormHtml(existing){
+    return `
+      <div class="doc-editor" data-doc-form="1">
+        <input type="text" data-field="title" value="${escapeHtml(existing ? existing.title : '')}" placeholder="Tytuł dokumentu / folderu">
+        <textarea data-field="content" placeholder="Treść (opcjonalnie — zostaw puste, jeśli to ma być tylko folder na poddokumenty)">${escapeHtml(existing ? existing.content : '')}</textarea>
+        <div class="form-actions">
+          <button class="primary" data-action="save-doc">Zapisz</button>
+          <button class="text-btn" data-action="cancel-doc">Anuluj</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function wireDocForm(container, existingId, parentId){
+    const form = container.querySelector('[data-doc-form]');
+    if(!form) return;
+    form.addEventListener('click', (e) => e.stopPropagation());
+    form.querySelector('[data-action="save-doc"]').addEventListener('click', async () => {
+      const title = form.querySelector('[data-field="title"]').value.trim();
+      const content = form.querySelector('[data-field="content"]').value;
+      if(!title){ alert('Podaj tytuł.'); return; }
+      const saveBtn = form.querySelector('[data-action="save-doc"]');
+      saveBtn.disabled = true;
+      try{
+        if(existingId){
+          const res = await fetch('/api/documents/' + existingId, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title, content })
+          });
+          if(!res.ok) throw new Error((await res.json()).error || 'Błąd zapisu.');
+        } else {
+          const res = await fetch('/api/documents', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title, parent_id: parentId })
+          });
+          if(!res.ok) throw new Error((await res.json()).error || 'Błąd tworzenia.');
+        }
+      }catch(err){
+        alert('Nie udało się zapisać dokumentu: ' + err.message);
+        saveBtn.disabled = false;
+        return;
+      }
+      editingDocId = null;
+      newDocParent = undefined;
+      await loadDocuments();
+    });
+    form.querySelector('[data-action="cancel-doc"]').addEventListener('click', () => {
+      editingDocId = null;
+      newDocParent = undefined;
+      renderDocuments();
+    });
+  }
+
+  function renderDocNode(doc, children, depth){
+    const wrap = document.createElement('div');
+    wrap.className = 'doc-node';
+
+    if(editingDocId === doc.id){
+      wrap.innerHTML = buildDocFormHtml(doc);
+      wireDocForm(wrap, doc.id, doc.parent_id);
+      return wrap;
+    }
+
+    const hasChildren = children.length > 0;
+    const collapsed = !!collapsedDocs[doc.id];
+
+    const row = document.createElement('div');
+    row.className = 'doc-row' + (collapsed ? ' collapsed' : '');
+    row.innerHTML = `
+      <span class="arrow">${hasChildren ? '▾' : '·'}</span>
+      <span class="title">${escapeHtml(doc.title)}</span>
+      <span class="doc-actions">
+        <button data-action="add-child" title="Dodaj poddokument">+ pod</button>
+        <button data-action="edit-doc" title="Edytuj">edytuj</button>
+        <button data-action="delete-doc" class="danger" title="Usuń">usuń</button>
+      </span>
+    `;
+    row.addEventListener('click', (e) => {
+      if(e.target.closest('[data-action]')) return;
+      if(!hasChildren) return;
+      collapsedDocs[doc.id] = !collapsedDocs[doc.id];
+      renderDocuments();
+    });
+    row.querySelector('[data-action="add-child"]').addEventListener('click', (e) => {
+      e.stopPropagation();
+      newDocParent = doc.id;
+      editingDocId = null;
+      collapsedDocs[doc.id] = false;
+      renderDocuments();
+    });
+    row.querySelector('[data-action="edit-doc"]').addEventListener('click', (e) => {
+      e.stopPropagation();
+      editingDocId = doc.id;
+      newDocParent = undefined;
+      renderDocuments();
+    });
+    row.querySelector('[data-action="delete-doc"]').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const warn = children.length ? ` Usunie to też ${children.length} poddokument(ów).` : '';
+      if(!confirm(`Usunąć "${doc.title}"?${warn}`)) return;
+      try{
+        const res = await fetch('/api/documents/' + doc.id, { method: 'DELETE' });
+        if(!res.ok) throw new Error((await res.json()).error || 'Błąd usuwania.');
+      }catch(err){ alert('Nie udało się usunąć: ' + err.message); return; }
+      await loadDocuments();
+    });
+
+    wrap.appendChild(row);
+
+    if(newDocParent === doc.id){
+      const formWrap = document.createElement('div');
+      formWrap.innerHTML = buildDocFormHtml(null);
+      wrap.appendChild(formWrap);
+      wireDocForm(formWrap, null, doc.id);
+    }
+
+    if(hasChildren && !collapsed){
+      const childrenWrap = document.createElement('div');
+      childrenWrap.className = 'doc-children';
+      children.forEach(child => {
+        const grandchildren = state.documents.filter(d => d.parent_id === child.id);
+        childrenWrap.appendChild(renderDocNode(child, grandchildren, depth + 1));
+      });
+      wrap.appendChild(childrenWrap);
+    }
+
+    return wrap;
+  }
+
+  function renderDocuments(){
+    documentTreeEl.innerHTML = '';
+
+    if(newDocParent === null){
+      const formWrap = document.createElement('div');
+      formWrap.innerHTML = buildDocFormHtml(null);
+      documentTreeEl.appendChild(formWrap);
+      wireDocForm(formWrap, null, null);
+    }
+
+    const roots = state.documents.filter(d => !d.parent_id);
+
+    if(roots.length === 0){
+      documentEmptyEl.style.display = 'block';
+      documentTreeEl.appendChild(documentEmptyEl);
+      return;
+    }
+
+    roots.forEach(doc => {
+      const children = state.documents.filter(d => d.parent_id === doc.id);
+      documentTreeEl.appendChild(renderDocNode(doc, children, 0));
     });
   }
 
@@ -543,39 +818,29 @@
       if(data.error){
         throw new Error(typeof data.error === 'string' ? data.error : (data.error.message || 'Błąd serwera.'));
       }
-      const candidate = data.candidates && data.candidates[0];
-      const parts = candidate && candidate.content && candidate.content.parts;
-      const raw = Array.isArray(parts) ? parts.map(p => p.text || '').join('') : '';
-      const clean = raw.replace(/```json|```/g, '').trim();
-
-      let parsed;
-      let parseFailed = false;
-      try{ parsed = JSON.parse(clean); }
-      catch(parseErr){
-        parseFailed = true;
-        parsed = { reply: raw || 'Nie udało się odczytać odpowiedzi.', entities: [], inconsistencies: [] };
-      }
 
       typingEl.remove();
 
-      const replyText = parsed.reply || '(brak treści odpowiedzi)';
+      const replyText = data.reply || '(brak treści odpowiedzi)';
       state.messages.push({ role: 'assistant', content: replyText });
       appendMessageEl({ role: 'assistant', content: replyText }, true);
 
-      if(parseFailed){
+      if(data.parseFailed){
         const warn = 'Ta odpowiedź nie została poprawnie odczytana, więc baza jednostek NIE została zaktualizowana w tej turze.';
         state.messages.push({ role: 'warning', content: warn });
         appendMessageEl({ role: 'warning', content: warn }, true);
       }
 
-      if(Array.isArray(parsed.inconsistencies) && parsed.inconsistencies.length){
-        parsed.inconsistencies.forEach(text => {
+      if(Array.isArray(data.inconsistencies) && data.inconsistencies.length){
+        data.inconsistencies.forEach(text => {
           state.messages.push({ role: 'inconsistency', content: text });
           appendMessageEl({ role: 'inconsistency', content: text }, true);
         });
       }
 
-      mergeEntities(parsed.entities);
+      // Jednostki zostały już zapisane do wspólnej bazy przez backend —
+      // tu tylko odświeżamy widok u siebie, bez ponownego zapisu.
+      mergeEntities(data.entities);
       renderEntities();
       persist();
 
