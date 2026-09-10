@@ -154,6 +154,42 @@ app.delete('/api/documents/:id', asyncRoute(async (req, res) => {
   res.json({ ok: true });
 }));
 
+const RESPONSE_SCHEMA = {
+  type: 'object',
+  properties: {
+    reply: { type: 'string' },
+    entities: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          name: { type: 'string' },
+          kategoria: { type: 'string' },
+          tajnosc: { type: 'string' },
+          opis: { type: 'string' },
+          status: { type: 'string' },
+          powiazania: { type: 'string' },
+          nadrzedna: { type: 'string' },
+        },
+        required: ['name'],
+      },
+    },
+    inconsistencies: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['reply', 'entities', 'inconsistencies'],
+};
+
+// Ten projekt to świadomie mroczna, dojrzała fikcja (styl SCP) — łagodzimy
+// domyślne progi Gemini dla przemocy/treści niepokojących, żeby nie blokował
+// zwykłych opisów anomalii czy starć. Treści jednoznacznie zakazane (np.
+// seksualizacja nieletnich) i tak zawsze zostaną odrzucone przez Google.
+const SAFETY_SETTINGS = [
+  { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_ONLY_HIGH' },
+  { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_ONLY_HIGH' },
+  { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_ONLY_HIGH' },
+  { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+];
+
 // ---------- Czat z Gemini ----------
 
 app.post('/api/chat', asyncRoute(async (req, res) => {
@@ -175,9 +211,11 @@ app.post('/api/chat', asyncRoute(async (req, res) => {
       body: JSON.stringify({
         contents,
         systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined,
+        safetySettings: SAFETY_SETTINGS,
         generationConfig: {
-          maxOutputTokens: 4096,
+          maxOutputTokens: 8192,
           responseMimeType: 'application/json',
+          responseSchema: RESPONSE_SCHEMA,
         },
       }),
     });
@@ -189,10 +227,22 @@ app.post('/api/chat', asyncRoute(async (req, res) => {
       return res.status(geminiResponse.status).json({ error: msg });
     }
 
+    // Zapytanie zablokowane w całości, zanim model zaczął odpowiadać.
+    if (data.promptFeedback && data.promptFeedback.blockReason) {
+      console.error('Gemini zablokował zapytanie:', JSON.stringify(data.promptFeedback));
+      return res.json({
+        reply: `Gemini zablokował tę wiadomość swoimi filtrami bezpieczeństwa (powód: ${data.promptFeedback.blockReason}). Spróbuj przeformułować wiadomość.`,
+        entities: [],
+        inconsistencies: [],
+        parseFailed: true,
+      });
+    }
+
     const candidate = data.candidates && data.candidates[0];
     const parts = candidate && candidate.content && candidate.content.parts;
     const raw = Array.isArray(parts) ? parts.map((p) => p.text || '').join('') : '';
     const clean = raw.replace(/```json|```/g, '').trim();
+    const finishReason = candidate && candidate.finishReason;
 
     let parsed;
     let parseFailed = false;
@@ -200,7 +250,13 @@ app.post('/api/chat', asyncRoute(async (req, res) => {
       parsed = JSON.parse(clean);
     } catch (e) {
       parseFailed = true;
-      parsed = { reply: raw || 'Nie udało się odczytać odpowiedzi.', entities: [], inconsistencies: [] };
+      console.error('Nie udało się sparsować JSON od Gemini. finishReason:', finishReason, '| surowy tekst:', raw.slice(0, 500));
+      let hint = 'Nie udało się odczytać odpowiedzi.';
+      if (finishReason === 'SAFETY') hint = 'Odpowiedź została zablokowana przez filtry bezpieczeństwa Gemini (finishReason: SAFETY).';
+      else if (finishReason === 'MAX_TOKENS') hint = 'Odpowiedź została ucięta, bo przekroczyła limit tokenów (finishReason: MAX_TOKENS) — spróbuj krótszej wiadomości.';
+      else if (finishReason === 'RECITATION') hint = 'Gemini odmówił odpowiedzi z powodu podejrzenia o cytowanie chronionej treści (finishReason: RECITATION).';
+      else if (!raw) hint = `Model nie zwrócił żadnej treści (finishReason: ${finishReason || 'nieznany'}).`;
+      parsed = { reply: hint, entities: [], inconsistencies: [] };
     }
 
     const entities = Array.isArray(parsed.entities) ? parsed.entities : [];
