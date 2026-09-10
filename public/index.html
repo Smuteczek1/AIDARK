@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DARK — Archiwum</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,500;0,8..60,600;1,8..60,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0B0E11; --panel:#12161B; --panel-alt:#171C22; --panel-raised:#1B2027;
+    --border:#262C33; --border-soft:#1D2229;
+    --accent:#C9A24B; --accent-dim:#8C7239; --accent-soft:rgba(201,162,75,0.12);
+    --text:#E8E6DF; --text-muted:#8A8F98; --text-faint:#565C64;
+    --danger:#B4483A; --danger-bg:rgba(180,72,58,0.10);
+    --font-serif:'Source Serif 4', Georgia, serif;
+    --font-mono:'IBM Plex Mono', ui-monospace, monospace;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  body{ margin:0; background:var(--bg); color:var(--text); font-family:var(--font-serif); display:flex; flex-direction:column; min-height:100vh; }
+  header{
+    position:relative; display:flex; align-items:baseline; justify-content:space-between; gap:16px;
+    padding:24px 28px 20px; border-bottom:1px solid var(--border); flex-wrap:wrap; overflow:hidden;
+  }
+  header::before{
+    content:'DARK'; position:absolute; right:24px; top:50%; transform:translateY(-50%);
+    font-family:var(--font-serif); font-weight:600; font-size:76px; letter-spacing:2px;
+    color:var(--text); opacity:0.035; pointer-events:none; white-space:nowrap;
+  }
+  .brand{display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; position:relative;}
+  .brand h1{ font-size:29px; font-weight:600; margin:0; letter-spacing:0.5px; color:var(--text); }
+  .brand p{ margin:0; font-family:var(--font-mono); font-size:12.5px; color:var(--text-muted); }
+  .header-actions{display:flex; gap:10px; align-items:center; position:relative;}
+  button.ghost{
+    background:transparent; border:1px solid var(--border); color:var(--text-muted);
+    font-family:var(--font-mono); font-size:12px; padding:8px 12px; border-radius:3px;
+    cursor:pointer; transition:border-color .15s, color .15s;
+  }
+  button.ghost:hover{border-color:var(--accent-dim); color:var(--accent);}
+  button.primary{
+    background:var(--accent); color:#141210; border:none; font-family:var(--font-mono);
+    font-weight:600; font-size:12px; padding:8px 13px; border-radius:3px; cursor:pointer; transition:background .15s;
+  }
+  button.primary:hover{background:#DDB76A;}
+  button.text-btn{ background:transparent; border:none; color:var(--text-muted); font-family:var(--font-mono); font-size:11px; cursor:pointer; padding:4px 0; }
+  button.text-btn:hover{color:var(--accent);}
+  button.text-btn.danger:hover{color:var(--danger);}
+  #sidebarToggle{display:none;}
+  .layout{ flex:1; display:grid; grid-template-columns:1fr 400px; min-height:0; }
+  @media (max-width:900px){
+    .layout{grid-template-columns:1fr;}
+    #sidebar{ position:fixed; inset:0 0 0 auto; width:min(400px,90vw); z-index:20; transform:translateX(100%); transition:transform .2s ease; }
+    #sidebar.open{transform:translateX(0);}
+    #sidebarToggle{display:inline-block;}
+    #sidebarBackdrop{display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:19;}
+    #sidebarBackdrop.open{display:block;}
+  }
+  main{ display:flex; flex-direction:column; min-height:0; border-right:1px solid var(--border); }
+  #chat{ flex:1; overflow-y:auto; padding:26px 28px; display:flex; flex-direction:column; gap:20px; }
+  .empty-state{ margin:auto; max-width:480px; text-align:left; color:var(--text-muted); }
+  .empty-state h2{ font-family:var(--font-serif); font-weight:500; color:var(--text); font-size:20px; margin:0 0 10px; }
+  .empty-state p{line-height:1.6; font-size:15px; margin:0 0 8px;}
+  .msg{max-width:78%; line-height:1.65; font-size:15.5px;}
+  .msg.user{align-self:flex-end; }
+  .msg.assistant{align-self:flex-start;}
+  .bubble{ padding:14px 16px; border-radius:4px; white-space:pre-wrap; }
+  .msg.user .bubble{ background:var(--panel-alt); border:1px solid var(--border); }
+  .msg.assistant .bubble{ background:transparent; border-left:2px solid var(--accent-dim); padding-left:16px; border-radius:0; }
+  .msg .role-label{ font-family:var(--font-mono); font-size:10.5px; color:var(--text-muted); margin-bottom:6px; display:block; }
+  .inconsistency{
+    align-self:flex-start; max-width:78%; background:var(--danger-bg); border-left:2px solid var(--danger);
+    padding:10px 14px; font-family:var(--font-mono); font-size:12.5px; color:#D89087; line-height:1.55;
+  }
+  .inconsistency b{color:#E8B3A9; font-weight:600;}
+  .typing{ align-self:flex-start; font-family:var(--font-mono); font-size:12px; color:var(--text-muted); padding-left:16px; border-left:2px solid var(--border); }
+  #inputRow{ border-top:1px solid var(--border); padding:16px 20px; display:flex; gap:10px; align-items:flex-end; background:var(--panel); }
+  #inputRow textarea{
+    flex:1; resize:none; background:var(--bg); border:1px solid var(--border); color:var(--text);
+    font-family:var(--font-serif); font-size:15px; padding:12px 14px; border-radius:4px; line-height:1.5;
+    min-height:46px; max-height:160px;
+  }
+  #inputRow textarea:focus{outline:none; border-color:var(--accent-dim);}
+  #sendBtn{
+    background:var(--accent); color:#141210; border:none; font-family:var(--font-mono); font-weight:600;
+    font-size:13px; padding:12px 20px; border-radius:4px; cursor:pointer; transition:background .15s;
+  }
+  #sendBtn:hover:not(:disabled){background:#DDB76A;}
+  #sendBtn:disabled{opacity:.4; cursor:default;}
+  .footnote{ font-family:var(--font-mono); font-size:10.5px; color:var(--text-faint); padding:0 20px 12px; background:var(--panel); }
+  #sidebar{ background:var(--panel); display:flex; flex-direction:column; min-height:0; }
+  .sidebar-head{ padding:18px 20px 14px; border-bottom:1px solid var(--border); }
+  .sidebar-head .row1{ display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+  .sidebar-head h2{ font-size:15px; margin:0; font-weight:600; display:flex; align-items:baseline; gap:8px; }
+  .sidebar-head h2 .count{ font-family:var(--font-mono); font-size:11px; color:var(--accent); font-weight:400; }
+  #entitySearch{
+    width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text);
+    font-family:var(--font-mono); font-size:12.5px; padding:8px 10px; border-radius:3px;
+  }
+  #entitySearch:focus{outline:none; border-color:var(--accent-dim);}
+  #entityList{ flex:1; overflow-y:auto; padding:10px 16px 20px; }
+  .category-section{ margin-top:14px; }
+  .category-header{ display:flex; align-items:center; gap:8px; cursor:pointer; padding:6px 2px; user-select:none; }
+  .category-header .arrow{ font-family:var(--font-mono); font-size:10px; color:var(--text-faint); transition:transform .15s; display:inline-block; width:10px; }
+  .category-section.collapsed .arrow{ transform:rotate(-90deg); }
+  .category-header .cat-name{ font-family:var(--font-mono); font-size:11px; letter-spacing:.4px; color:var(--text-muted); text-transform:uppercase; }
+  .category-header .cat-count{ font-family:var(--font-mono); font-size:10.5px; color:var(--text-faint); }
+  .category-header::after{ content:''; flex:1; height:1px; background:var(--border-soft); }
+  .category-cards{ display:flex; flex-direction:column; gap:8px; margin-top:8px; }
+  .category-section.collapsed .category-cards{ display:none; }
+  .entity-card{ border:1px solid var(--border); border-radius:4px; padding:11px 13px; background:var(--panel-alt); cursor:pointer; }
+  .entity-card .row{ display:flex; justify-content:space-between; align-items:baseline; gap:10px; }
+  .entity-card .name{ font-family:var(--font-serif); font-weight:600; font-size:14.5px; color:var(--text); }
+  .entity-card .tajnosc-badge{
+    font-family:var(--font-mono); font-size:9px; letter-spacing:.3px; color:var(--accent);
+    border:1px solid var(--accent-dim); padding:2px 6px; border-radius:2px; white-space:nowrap; text-transform:uppercase;
+  }
+  .entity-card .opis{ margin-top:8px; font-size:13px; line-height:1.55; color:var(--text-muted); display:none; }
+  .entity-card.expanded .opis{display:block;}
+  .entity-card .meta{ margin-top:9px; font-family:var(--font-mono); font-size:10.5px; color:var(--text-faint); display:none; gap:4px; flex-direction:column; }
+  .entity-card.expanded .meta{display:flex;}
+  .entity-card .meta span{color:var(--text-muted);}
+  .entity-card .card-actions{ display:none; gap:14px; margin-top:10px; padding-top:9px; border-top:1px solid var(--border-soft); }
+  .entity-card.expanded .card-actions{display:flex;}
+  .entity-empty{ color:var(--text-muted); font-size:13px; line-height:1.6; padding:10px 4px; }
+  .entity-form{
+    border:1px solid var(--accent-dim); border-radius:4px; padding:13px; background:var(--panel-raised);
+    display:flex; flex-direction:column; gap:9px; margin-bottom:10px;
+  }
+  .entity-form label{ font-family:var(--font-mono); font-size:10px; color:var(--text-muted); text-transform:uppercase; letter-spacing:.3px; display:block; margin-bottom:3px; }
+  .entity-form input, .entity-form select, .entity-form textarea{
+    width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text);
+    font-family:var(--font-serif); font-size:13.5px; padding:7px 9px; border-radius:3px;
+  }
+  .entity-form textarea{resize:vertical; min-height:56px;}
+  .entity-form input:focus, .entity-form select:focus, .entity-form textarea:focus{outline:none; border-color:var(--accent-dim);}
+  .entity-form .form-row{display:flex; gap:8px;}
+  .entity-form .form-row > div{flex:1;}
+  .entity-form .form-actions{display:flex; gap:10px; margin-top:4px;}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <h1>DARK</h1>
+    <p>archiwum jednostek &amp; historii</p>
+  </div>
+  <div class="header-actions">
+    <button class="ghost" id="sidebarToggle">baza jednostek</button>
+    <button class="ghost" id="resetBtn">resetuj archiwum</button>
+  </div>
+</header>
+
+<div class="layout">
+  <main>
+    <div id="chat">
+      <div class="empty-state" id="emptyState">
+        <h2>Zacznij pisać uniwersum DARK.</h2>
+        <p>Opisz pierwszą scenę, jednostkę, anomalię albo korporację — a ja będę rozwijać historię razem z Tobą, dopytywać o brakujące szczegóły i pilnować, żeby wszystko trzymało się logicznie.</p>
+        <p>Wszystko, co ustalimy, trafi do bazy jednostek po prawej — możesz też dopisywać i poprawiać wpisy ręcznie.</p>
+      </div>
+    </div>
+    <div id="inputRow">
+      <textarea id="userInput" placeholder="Napisz fragment historii, opisz jednostkę albo zadaj pytanie…" rows="1"></textarea>
+      <button id="sendBtn">Wyślij</button>
+    </div>
+    <div class="footnote">Aplikacja łączy się z własnym serwerem (Node.js), który bezpiecznie przekazuje zapytania do Gemini API.</div>
+  </main>
+
+  <div id="sidebarBackdrop"></div>
+  <aside id="sidebar">
+    <div class="sidebar-head">
+      <div class="row1">
+        <h2>Baza jednostek <span class="count" id="entityCount">0</span></h2>
+        <button class="primary" id="addEntityBtn">+ Nowa</button>
+      </div>
+      <input type="text" id="entitySearch" placeholder="szukaj po nazwie, kategorii, powiązaniach…">
+    </div>
+    <div id="entityList">
+      <div class="entity-empty" id="entityEmpty">Baza jest jeszcze pusta. W miarę jak pojawiają się nowe jednostki, korporacje albo anomalie, będą tu zapisywane — albo dodaj pierwszą ręcznie.</div>
+    </div>
+  </aside>
+</div>
+
+<script>
+(function(){
+  const STORAGE_KEY = 'dark-archive-state-v2';
+
+  const CATEGORIES = ['Korporacja','Jednostka / Wydział','Frakcja','Postać','Anomalia','Miejsce','Wydarzenie','Inne'];
+
+  let state = { messages: [], entities: {} };
+  let collapsedCategories = {};
+  let editingKey = null;
+
+  const chatEl = document.getElementById('chat');
+  const emptyState = document.getElementById('emptyState');
+  const inputEl = document.getElementById('userInput');
+  const sendBtn = document.getElementById('sendBtn');
+  const entityListEl = document.getElementById('entityList');
+  const entityEmptyEl = document.getElementById('entityEmpty');
+  const entityCountEl = document.getElementById('entityCount');
+  const entitySearchEl = document.getElementById('entitySearch');
+  const sidebarEl = document.getElementById('sidebar');
+  const sidebarBackdrop = document.getElementById('sidebarBackdrop');
+  const resetBtn = document.getElementById('resetBtn');
+  const addEntityBtn = document.getElementById('addEntityBtn');
+
+  function escapeHtml(str){
+    const d = document.createElement('div');
+    d.textContent = str == null ? '' : String(str);
+    return d.innerHTML;
+  }
+
+  function autoResize(){
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+  }
+  inputEl.addEventListener('input', autoResize);
+  inputEl.addEventListener('keydown', (e)=>{
+    if(e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); sendMessage(); }
+  });
+  sendBtn.addEventListener('click', sendMessage);
+
+  document.getElementById('sidebarToggle').addEventListener('click', ()=>{
+    sidebarEl.classList.add('open');
+    sidebarBackdrop.classList.add('open');
+  });
+  sidebarBackdrop.addEventListener('click', ()=>{
+    sidebarEl.classList.remove('open');
+    sidebarBackdrop.classList.remove('open');
+  });
+
+  entitySearchEl.addEventListener('input', renderEntities);
+
+  addEntityBtn.addEventListener('click', ()=>{
+    editingKey = '__new__';
+    renderEntities();
+  });
+
+  resetBtn.addEventListener('click', async ()=>{
+    if(!confirm('Na pewno wyczyścić całe archiwum — historię rozmowy i bazę jednostek? Tej operacji nie można cofnąć.')) return;
+    state = { messages: [], entities: {} };
+    editingKey = null;
+    renderChat();
+    renderEntities();
+    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){ console.error(e); }
+  });
+
+  function persist(){
+    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+    catch(e){ console.error('Nie udało się zapisać stanu archiwum:', e); }
+  }
+
+  function loadState(){
+    try{
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if(raw){
+        const parsed = JSON.parse(raw);
+        if(parsed && typeof parsed === 'object'){
+          state.messages = Array.isArray(parsed.messages) ? parsed.messages : [];
+          state.entities = parsed.entities && typeof parsed.entities === 'object' ? parsed.entities : {};
+          Object.values(state.entities).forEach(e => { if(!e.kategoria && e.type) e.kategoria = e.type; });
+        }
+      }
+    }catch(e){ /* brak zapisanego stanu */ }
+    renderChat();
+    renderEntities();
+  }
+
+  function renderChat(){
+    chatEl.querySelectorAll('.msg, .inconsistency').forEach(n => n.remove());
+    if(state.messages.length === 0){ emptyState.style.display = 'block'; }
+    else{ emptyState.style.display = 'none'; state.messages.forEach(m => appendMessageEl(m, false)); }
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  function appendMessageEl(m, scroll){
+    if(m.role === 'inconsistency' || m.role === 'warning'){
+      const div = document.createElement('div');
+      div.className = 'inconsistency';
+      const label = m.role === 'warning' ? 'Uwaga' : 'Niespójność';
+      div.innerHTML = '<b>' + label + ':</b> ' + escapeHtml(m.content);
+      chatEl.appendChild(div);
+    } else {
+      const div = document.createElement('div');
+      div.className = 'msg ' + (m.role === 'user' ? 'user' : 'assistant');
+      const label = document.createElement('span');
+      label.className = 'role-label';
+      label.textContent = m.role === 'user' ? 'TY' : 'DARK';
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+      bubble.textContent = m.content;
+      div.appendChild(label);
+      div.appendChild(bubble);
+      chatEl.appendChild(div);
+    }
+    if(scroll) chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  function emptyEntity(){
+    return { name:'', kategoria:CATEGORIES[0], tajnosc:'', opis:'', status:'', powiazania:'', nadrzedna:'' };
+  }
+
+  function buildFormHtml(entity){
+    const catOptions = CATEGORIES.map(c =>
+      `<option value="${escapeHtml(c)}" ${entity.kategoria===c?'selected':''}>${escapeHtml(c)}</option>`
+    ).join('');
+    return `
+      <div class="entity-form" data-form="1">
+        <div><label>Nazwa</label><input type="text" data-field="name" value="${escapeHtml(entity.name)}" placeholder="np. EYE — Esoteric Yottabyte Exchange"></div>
+        <div class="form-row">
+          <div><label>Kategoria</label><select data-field="kategoria">${catOptions}</select></div>
+          <div><label>Klasyfikacja / tajność (opcjonalnie)</label><input type="text" data-field="tajnosc" value="${escapeHtml(entity.tajnosc)}" placeholder="np. Ściśle tajna"></div>
+        </div>
+        <div><label>Opis</label><textarea data-field="opis" placeholder="Czym jest, co robi…">${escapeHtml(entity.opis)}</textarea></div>
+        <div class="form-row">
+          <div><label>Status</label><input type="text" data-field="status" value="${escapeHtml(entity.status)}" placeholder="np. aktywna"></div>
+          <div><label>Nadrzędna jednostka (opcjonalnie)</label><input type="text" data-field="nadrzedna" value="${escapeHtml(entity.nadrzedna)}" placeholder="np. EYE"></div>
+        </div>
+        <div><label>Powiązania</label><input type="text" data-field="powiazania" value="${escapeHtml(entity.powiazania)}" placeholder="np. DARK, APEX"></div>
+        <div class="form-actions">
+          <button class="primary" data-action="save">Zapisz</button>
+          <button class="text-btn" data-action="cancel">Anuluj</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function wireForm(container, key){
+    const form = container.querySelector('[data-form]');
+    if(!form) return;
+    form.addEventListener('click', (e) => e.stopPropagation());
+    form.querySelector('[data-action="save"]').addEventListener('click', () => {
+      const get = (f) => form.querySelector(`[data-field="${f}"]`).value.trim();
+      const name = get('name');
+      if(!name){ alert('Podaj nazwę jednostki.'); return; }
+      const newEntity = {
+        name, kategoria: get('kategoria'), tajnosc: get('tajnosc'),
+        opis: get('opis'), status: get('status'),
+        powiazania: get('powiazania'), nadrzedna: get('nadrzedna')
+      };
+      const newKey = name.toLowerCase();
+      if(key !== '__new__' && key !== newKey) delete state.entities[key];
+      state.entities[newKey] = newEntity;
+      editingKey = null;
+      renderEntities();
+      persist();
+    });
+    form.querySelector('[data-action="cancel"]').addEventListener('click', () => {
+      editingKey = null;
+      renderEntities();
+    });
+  }
+
+  function renderEntities(){
+    const query = entitySearchEl.value.trim().toLowerCase();
+    entityCountEl.textContent = Object.keys(state.entities).length;
+    entityListEl.innerHTML = '';
+
+    if(editingKey === '__new__'){
+      const wrap = document.createElement('div');
+      wrap.innerHTML = buildFormHtml(emptyEntity());
+      entityListEl.appendChild(wrap);
+      wireForm(wrap, '__new__');
+    }
+
+    const entries = Object.entries(state.entities).filter(([key, e]) => {
+      if(!query) return true;
+      return (e.name||'').toLowerCase().includes(query)
+        || (e.kategoria||'').toLowerCase().includes(query)
+        || (e.powiazania||'').toLowerCase().includes(query)
+        || (e.nadrzedna||'').toLowerCase().includes(query);
+    });
+
+    if(entries.length === 0 && editingKey !== '__new__'){
+      entityEmptyEl.style.display = 'block';
+      entityEmptyEl.textContent = query
+        ? 'Brak jednostek pasujących do wyszukiwania.'
+        : 'Baza jest jeszcze pusta. W miarę jak pojawiają się nowe jednostki, korporacje albo anomalie, będą tu zapisywane — albo dodaj pierwszą ręcznie.';
+      entityListEl.appendChild(entityEmptyEl);
+      return;
+    }
+    if(entries.length === 0) return;
+
+    const byCategory = {};
+    entries.forEach(([key, e]) => {
+      const cat = e.kategoria || 'Inne';
+      if(!byCategory[cat]) byCategory[cat] = [];
+      byCategory[cat].push([key, e]);
+    });
+
+    const orderedCats = [
+      ...CATEGORIES.filter(c => byCategory[c]),
+      ...Object.keys(byCategory).filter(c => !CATEGORIES.includes(c)).sort()
+    ];
+
+    orderedCats.forEach(cat => {
+      const items = byCategory[cat].sort((a,b) => a[1].name.localeCompare(b[1].name));
+      const section = document.createElement('div');
+      section.className = 'category-section' + (collapsedCategories[cat] ? ' collapsed' : '');
+
+      const header = document.createElement('div');
+      header.className = 'category-header';
+      header.innerHTML = `<span class="arrow">▾</span><span class="cat-name">${escapeHtml(cat)}</span><span class="cat-count">${items.length}</span>`;
+      header.addEventListener('click', () => {
+        collapsedCategories[cat] = !collapsedCategories[cat];
+        section.classList.toggle('collapsed');
+      });
+      section.appendChild(header);
+
+      const cardsWrap = document.createElement('div');
+      cardsWrap.className = 'category-cards';
+
+      items.forEach(([key, e]) => {
+        if(editingKey === key){
+          const wrap = document.createElement('div');
+          wrap.innerHTML = buildFormHtml(e);
+          cardsWrap.appendChild(wrap);
+          wireForm(wrap, key);
+          return;
+        }
+        const card = document.createElement('div');
+        card.className = 'entity-card';
+        card.innerHTML = `
+          <div class="row">
+            <div class="name">${escapeHtml(e.name)}</div>
+            ${e.tajnosc ? `<div class="tajnosc-badge">${escapeHtml(e.tajnosc)}</div>` : ''}
+          </div>
+          <div class="opis">${escapeHtml(e.opis || 'Brak opisu.')}</div>
+          <div class="meta">
+            ${e.status ? '<div>status: <span>' + escapeHtml(e.status) + '</span></div>' : ''}
+            ${e.nadrzedna ? '<div>część: <span>' + escapeHtml(e.nadrzedna) + '</span></div>' : ''}
+            ${e.powiazania ? '<div>powiązania: <span>' + escapeHtml(e.powiazania) + '</span></div>' : ''}
+          </div>
+          <div class="card-actions">
+            <button class="text-btn" data-action="edit">Edytuj</button>
+            <button class="text-btn danger" data-action="delete">Usuń</button>
+          </div>
+        `;
+        card.addEventListener('click', (e2) => {
+          if(e2.target.closest('[data-action]')) return;
+          card.classList.toggle('expanded');
+        });
+        card.querySelector('[data-action="edit"]').addEventListener('click', (e2) => {
+          e2.stopPropagation(); editingKey = key; renderEntities();
+        });
+        card.querySelector('[data-action="delete"]').addEventListener('click', (e2) => {
+          e2.stopPropagation();
+          if(!confirm(`Usunąć "${e.name}" z bazy?`)) return;
+          delete state.entities[key];
+          renderEntities();
+          persist();
+        });
+        cardsWrap.appendChild(card);
+      });
+
+      section.appendChild(cardsWrap);
+      entityListEl.appendChild(section);
+    });
+  }
+
+  function mergeEntities(updates){
+    if(!Array.isArray(updates)) return;
+    updates.forEach(u => {
+      if(!u || !u.name) return;
+      const key = u.name.trim().toLowerCase();
+      const existing = state.entities[key] || {};
+      state.entities[key] = {
+        name: u.name.trim(),
+        kategoria: u.kategoria || existing.kategoria || 'Inne',
+        tajnosc: u.tajnosc || existing.tajnosc || '',
+        opis: u.opis || existing.opis || '',
+        status: u.status || existing.status || '',
+        powiazania: u.powiazania || existing.powiazania || '',
+        nadrzedna: u.nadrzedna || existing.nadrzedna || ''
+      };
+    });
+  }
+
+  function buildSystemPrompt(){
+    const entitiesJson = JSON.stringify(Object.values(state.entities), null, 2);
+    return [
+      'Jesteś kreatywnym współautorem mrocznego uniwersum „DARK" — archiwum w stylu SCP, ale zaprojektowane tak, aby było BARDZIEJ spójne logicznie niż SCP: każda jednostka, korporacja, anomalia i wydarzenie musi trzymać się wewnętrznej logiki świata i nie zaprzeczać temu, co już ustalono.',
+      '',
+      'Twoja rola w rozmowie:',
+      '1. Współtworzysz fabułę i opisy jednostek razem z użytkownikiem. Rozwijasz to, co zaproponuje, zamiast pisać za niego całe rozdziały.',
+      '2. Gdy pojawia się nowa jednostka, organizacja, anomalia lub postać — NIE akceptuj jej biernie. Dopytaj o brakujące elementy (cel, motywacje, strukturę, zasoby, ograniczenia), jeśli nie zostały podane. Możesz zaproponować własne pomysły, ale zawsze zaznacz, że to propozycja do wyboru, a nie gotowa decyzja.',
+      '3. Aktywnie szukaj luk logicznych i sprzeczności między nową treścią a bazą danych podaną niżej. Zgłaszaj je wprost i konkretnie, nie przemilczaj ich z uprzejmości.',
+      '4. Na bieżąco aktualizuj strukturalną bazę jednostek — za każdym razem, gdy w rozmowie pojawi się nowa jednostka albo zmieni się coś w istniejącej.',
+      '5. Utrzymuj bazę uporządkowaną: każdej jednostce przypisuj DOKŁADNIE jedną z kategorii: ' + CATEGORIES.join(', ') + '. Jeśli jednostka jest częścią większej organizacji, wypełnij pole "nadrzedna" nazwą tej organizacji. Jeśli świat ma system klasyfikacji tajności, wypełniaj pole "tajnosc" zgodnie z nim; jeśli nie ma zastosowania, zostaw puste.',
+      '',
+      'Aktualna baza danych jednostek (JSON):',
+      entitiesJson,
+      '',
+      'Odpowiadaj WYŁĄCZNIE pojedynczym, poprawnym obiektem JSON — bez żadnego tekstu przed ani po, bez bloków markdown (bez ```), dokładnie w tym kształcie:',
+      '{',
+      '  "reply": "treść odpowiedzi po polsku, w naturalnym tonie — fragment historii, pytania doprecyzowujące, propozycje albo uwagi",',
+      '  "entities": [ { "name": "string", "kategoria": "jedna z: ' + CATEGORIES.join(' / ') + '", "tajnosc": "string, opcjonalne", "opis": "string", "status": "string", "powiazania": "string", "nadrzedna": "string, opcjonalne" } ],',
+      '  "inconsistencies": [ "krótki, konkretny opis wykrytej niespójności" ]',
+      '}',
+      '',
+      'Pole "entities" ma zawierać WYŁĄCZNIE jednostki nowe lub zaktualizowane w tej turze. Jeśli nic się nie zmieniło, zwróć pustą listę. Pole "inconsistencies" może być puste.',
+      '',
+      'WAŻNE ograniczenie techniczne: cała odpowiedź (reply + entities + inconsistencies) musi zmieścić się w limicie tokenów. Pole "reply" pisz zwięźle — maksymalnie kilka krótkich akapitów lub kilka konkretnych pytań/uwag, nawet przy bardzo długim dokumencie od użytkownika. Wybierz 2-4 najważniejsze punkty zamiast wyczerpującej analizy całości. Zawsze dokończ odpowiedź jako poprawny, kompletny JSON. Nie używaj formatowania markdown typu **pogrubienie** w polu "reply".'
+    ].join('\n');
+  }
+
+  async function sendMessage(){
+    const text = inputEl.value.trim();
+    if(!text || sendBtn.disabled) return;
+
+    state.messages.push({ role: 'user', content: text });
+    emptyState.style.display = 'none';
+    appendMessageEl({ role: 'user', content: text }, true);
+    inputEl.value = '';
+    autoResize();
+    persist();
+
+    sendBtn.disabled = true;
+    const typingEl = document.createElement('div');
+    typingEl.className = 'typing';
+    typingEl.textContent = 'DARK analizuje archiwum…';
+    chatEl.appendChild(typingEl);
+    chatEl.scrollTop = chatEl.scrollHeight;
+
+    try{
+      const recentHistory = state.messages
+        .filter(m => m.role === 'user' || m.role === 'assistant')
+        .slice(-16)
+        .map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
+
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: recentHistory,
+          systemInstruction: buildSystemPrompt()
+        })
+      });
+
+      const data = await response.json();
+      if(data.error){
+        throw new Error(typeof data.error === 'string' ? data.error : (data.error.message || 'Błąd serwera.'));
+      }
+      const candidate = data.candidates && data.candidates[0];
+      const parts = candidate && candidate.content && candidate.content.parts;
+      const raw = Array.isArray(parts) ? parts.map(p => p.text || '').join('') : '';
+      const clean = raw.replace(/```json|```/g, '').trim();
+
+      let parsed;
+      let parseFailed = false;
+      try{ parsed = JSON.parse(clean); }
+      catch(parseErr){
+        parseFailed = true;
+        parsed = { reply: raw || 'Nie udało się odczytać odpowiedzi.', entities: [], inconsistencies: [] };
+      }
+
+      typingEl.remove();
+
+      const replyText = parsed.reply || '(brak treści odpowiedzi)';
+      state.messages.push({ role: 'assistant', content: replyText });
+      appendMessageEl({ role: 'assistant', content: replyText }, true);
+
+      if(parseFailed){
+        const warn = 'Ta odpowiedź nie została poprawnie odczytana, więc baza jednostek NIE została zaktualizowana w tej turze.';
+        state.messages.push({ role: 'warning', content: warn });
+        appendMessageEl({ role: 'warning', content: warn }, true);
+      }
+
+      if(Array.isArray(parsed.inconsistencies) && parsed.inconsistencies.length){
+        parsed.inconsistencies.forEach(text => {
+          state.messages.push({ role: 'inconsistency', content: text });
+          appendMessageEl({ role: 'inconsistency', content: text }, true);
+        });
+      }
+
+      mergeEntities(parsed.entities);
+      renderEntities();
+      persist();
+
+    }catch(err){
+      typingEl.remove();
+      const errText = 'Coś poszło nie tak przy kontakcie z archiwum. Spróbuj wysłać wiadomość jeszcze raz.';
+      state.messages.push({ role: 'assistant', content: errText });
+      appendMessageEl({ role: 'assistant', content: errText }, true);
+      console.error('Błąd API:', err);
+    } finally {
+      sendBtn.disabled = false;
+      inputEl.focus();
+    }
+  }
+
+  loadState();
+})();
+</script>
+
+</body>
+</html>
