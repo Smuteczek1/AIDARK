@@ -22,11 +22,24 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
 
-// Supabase jest opcjonalne — jeśli zmienne nie są ustawione, endpointy
-// związane z bazą zwrócą czytelny błąd zamiast wywalać cały serwer.
-const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY)
-  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
-  : null;
+// Supabase jest opcjonalne — jeśli zmienne nie są ustawione albo są niepoprawne,
+// endpointy związane z bazą zwrócą czytelny błąd zamiast wywalać cały serwer
+// (a czat z Gemini, który Supabase w ogóle nie potrzebuje, ma dalej działać).
+let supabase = null;
+{
+  const url = (process.env.SUPABASE_URL || '').trim();
+  const key = (process.env.SUPABASE_SERVICE_KEY || '').trim();
+  if (url && key) {
+    try {
+      supabase = createClient(url, key);
+    } catch (err) {
+      console.error('Nie udało się zainicjować klienta Supabase — sprawdź SUPABASE_URL i SUPABASE_SERVICE_KEY:', err.message);
+      supabase = null;
+    }
+  } else {
+    console.warn('SUPABASE_URL / SUPABASE_SERVICE_KEY nie są ustawione — funkcje bazy danych będą wyłączone.');
+  }
+}
 
 function requireSupabase(res) {
   if (!supabase) {
