@@ -267,6 +267,19 @@
   .retry-box .retry-btn:hover:not(:disabled){ background:var(--danger); color:#fff; }
   .retry-box .retry-btn:disabled{ opacity:.5; cursor:default; }
 
+  /* ---------- Podsumowanie starszej części czatu (auto-czyszczenie) ---------- */
+  .summary-box{
+    align-self:center; max-width:82%; background:var(--panel-alt); border:1px solid var(--border);
+    border-radius:5px; padding:13px 16px; margin-bottom:6px;
+  }
+  .summary-box .summary-label{
+    font-family:var(--font-mono); font-size:10px; letter-spacing:.4px; text-transform:uppercase;
+    color:var(--text-faint); margin-bottom:7px;
+  }
+  .summary-box .summary-text{
+    font-family:var(--font-serif); font-size:13.5px; line-height:1.65; color:var(--text-muted); white-space:pre-wrap;
+  }
+
   /* ---------- Zakładka Propozycje ---------- */
   .tab-btn .tab-badge{
     display:inline-block; margin-left:5px; background:var(--accent); color:#141210;
@@ -384,7 +397,7 @@
 
   const CATEGORIES = ['Korporacja','Jednostka / Wydział','Frakcja','Postać','Anomalia','Miejsce','Wydarzenie','Inne'];
 
-  let state = { messages: [], entities: {}, documents: [], proposals: [] };
+  let state = { messages: [], entities: {}, documents: [], proposals: [], summary: '', pendingError: null };
   let collapsedCategories = {};
   let editingKey = null;
   let editingDocId = null;
@@ -393,6 +406,13 @@
   let expandedDocs = {};
   let busyProposalIds = {}; // proposal/batch id -> true, gdy trwa zatwierdzanie/odrzucanie (blokuje przyciski)
   let retryBoxEl = null; // aktualnie wyświetlone okno "Spróbuj ponownie" (jeśli jest)
+
+  // Po ilu turach (user+assistant, bez podsumowań/propozycji/niespójności)
+  // AI samo skraca starszą część czatu do podsumowania. KEEP_RECENT_TURNS
+  // to liczba OSTATNICH wiadomości user/assistant, które zostają w pełnej
+  // treści — starsze od nich trafiają do podsumowania i znikają z widoku.
+  const SUMMARIZE_AFTER_TURNS = 12;
+  const KEEP_RECENT_TURNS = 4;
 
   const chatEl = document.getElementById('chat');
   const emptyState = document.getElementById('emptyState');
@@ -502,14 +522,22 @@
   });
 
   resetBtn.addEventListener('click', ()=>{
-    if(!confirm('Wyczyścić lokalną historię TEJ rozmowy? Baza jednostek i dokumenty są wspólne i nie zostaną ruszone.')) return;
+    if(!confirm('Wyczyścić lokalną historię TEJ rozmowy (razem z podsumowaniem)? Baza jednostek i dokumenty są wspólne i nie zostaną ruszone.')) return;
     state.messages = [];
+    state.summary = '';
+    state.pendingError = null;
     renderChat();
     persist();
   });
 
   function persist(){
-    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify({ messages: state.messages })); }
+    try{
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({
+        messages: state.messages,
+        summary: state.summary,
+        pendingError: state.pendingError,
+      }));
+    }
     catch(e){ console.error('Nie udało się zapisać historii czatu:', e); }
   }
 
@@ -520,6 +548,8 @@
       if(raw){
         const parsed = JSON.parse(raw);
         if(parsed && Array.isArray(parsed.messages)) state.messages = parsed.messages;
+        if(parsed && typeof parsed.summary === 'string') state.summary = parsed.summary;
+        if(parsed && typeof parsed.pendingError === 'string') state.pendingError = parsed.pendingError;
       }
     }catch(e){ /* brak zapisanej historii */ }
     renderChat();
@@ -542,13 +572,29 @@
   }
 
   function renderChat(){
-    chatEl.querySelectorAll('.msg, .inconsistency, .proposal-notice, .retry-box').forEach(n => n.remove());
+    chatEl.querySelectorAll('.msg, .inconsistency, .proposal-notice, .retry-box, .summary-box').forEach(n => n.remove());
     retryBoxEl = null;
-    if(state.messages.length === 0){ emptyState.style.display = 'block'; }
+    if(state.messages.length === 0 && !state.summary){ emptyState.style.display = 'block'; }
     else{
       emptyState.style.display = 'none';
+      if(state.summary){
+        const sBox = document.createElement('div');
+        sBox.className = 'summary-box';
+        const label = document.createElement('div');
+        label.className = 'summary-label';
+        label.textContent = 'Podsumowanie wcześniejszej rozmowy (AI skróciło starszą część czatu)';
+        const txt = document.createElement('div');
+        txt.className = 'summary-text';
+        txt.textContent = state.summary;
+        sBox.appendChild(label);
+        sBox.appendChild(txt);
+        chatEl.appendChild(sBox);
+      }
       state.messages.forEach((m, i) => appendMessageEl(m, false, i));
     }
+    // Okno błędu przetrwa odświeżenie strony (F5) — znika dopiero, gdy
+    // wyślesz nową wiadomość, albo gdy kolejna próba się powiedzie.
+    if(state.pendingError){ showRetryBox(state.pendingError, { persistState: false }); }
     chatEl.scrollTop = chatEl.scrollHeight;
   }
 
@@ -603,7 +649,11 @@
     return 'Coś poszło nie tak przy kontakcie z archiwum.';
   }
 
-  function showRetryBox(message){
+  // persistState=true (domyślnie) zapisuje błąd do localStorage, żeby okno
+  // przetrwało odświeżenie strony. Przy odtwarzaniu z zapisanego stanu
+  // (renderChat po F5) przekazujemy false, żeby nie robić zbędnego zapisu.
+  function showRetryBox(message, opts){
+    const persistState = !opts || opts.persistState !== false;
     clearRetryBox();
     const box = document.createElement('div');
     box.className = 'retry-box';
@@ -627,6 +677,11 @@
     chatEl.appendChild(box);
     retryBoxEl = box;
     chatEl.scrollTop = chatEl.scrollHeight;
+
+    if(persistState){
+      state.pendingError = message;
+      persist();
+    }
   }
 
   function emptyEntity(){
@@ -1212,10 +1267,16 @@
       '4. Aktywnie szukaj luk logicznych i sprzeczności między nową treścią a bazą danych podaną niżej — zgłaszaj je przez flag_inconsistency, wprost i konkretnie.',
       '5. Samodzielnie decyduj, kiedy coś zasługuje na osobny dokument (dłuższa historia, opis wydarzenia, dossier postaci), a kiedy wystarczy wpis w bazie jednostek — i zakładaj dokumenty proaktywnie przez propose_create_document, gdy to ma sens, zamiast czekać, aż użytkownik o to poprosi.',
       '6. Utrzymuj bazę uporządkowaną: każdej jednostce przypisuj DOKŁADNIE jedną z kategorii: ' + CATEGORIES.join(', ') + '. Jeśli jednostka jest częścią większej organizacji, wypełnij pole "nadrzedna" nazwą tej organizacji. Jeśli świat ma system klasyfikacji tajności, wypełniaj pole "tajnosc" zgodnie z nim; jeśli nie ma zastosowania, pomiń je.',
+      '7. Starsza część tej rozmowy bywa automatycznie skracana do zwięzłego podsumowania (widocznego niżej, jeśli istnieje) — surowa treść starych wiadomości znika, żeby czat był czytelny. NIE polegaj na pamiętaniu drobnych szczegółów z przebiegu rozmowy. Wszystko, co ma się liczyć na stałe (fakty o jednostkach, wydarzenia, relacje), zapisuj od razu przez propose_create_entity / propose_update_entity / propose_create_document — baza jednostek i dokumenty to jedyne trwałe źródło prawdy o świecie, nie historia czatu.',
       '',
       'Aktualna baza danych jednostek (JSON, tylko do odczytu — zmieniaj ją WYŁĄCZNIE przez narzędzia propose_*):',
       entitiesJson,
       '',
+      ...(state.summary && state.summary.trim() ? [
+        'Podsumowanie wcześniejszej części TEJ rozmowy (starsze wiadomości zostały skrócone — poniższe podsumowanie je zastępuje jako kontekst, użytkownik też je widzi w czacie):',
+        state.summary.trim(),
+        ''
+      ] : []),
       'Gdy skończysz wywoływać narzędzia (jeśli w ogóle były potrzebne), odpowiedz naturalnym tekstem po polsku — bez JSON-a, bez bloków markdown, bez pogrubień gwiazdkami. To pole trafi bezpośrednio do czatu jako Twoja wypowiedź. Pisz zwięźle: kilka akapitów albo kilka konkretnych pytań/uwag, nawet przy bardzo długiej wiadomości od użytkownika.'
     ].join('\n');
   }
@@ -1235,7 +1296,10 @@
     const text = inputEl.value.trim();
     if(!text || sendBtn.disabled) return;
 
+    // Nowa wiadomość = koniec poprzedniego błędu (jedyny moment, w którym
+    // okno "Spróbuj ponownie" znika bez potrzeby ponawiania go).
     clearRetryBox();
+    state.pendingError = null;
     state.messages.push({ role: 'user', content: text });
     emptyState.style.display = 'none';
     appendMessageEl({ role: 'user', content: text }, true);
@@ -1298,17 +1362,71 @@
         await loadProposals();
       }
 
+      // Udana odpowiedź = koniec ewentualnego wcześniejszego błędu.
+      state.pendingError = null;
       persist();
+
+      // Auto-czyszczenie: jeśli czat urósł powyżej progu, AI samo skraca
+      // starszą część do podsumowania (baza jednostek/dokumentów i tak
+      // trzyma kanon na stałe, więc podsumowanie dotyczy tylko przebiegu
+      // SAMEJ rozmowy).
+      if(countRawTurns() >= SUMMARIZE_AFTER_TURNS){
+        await maybeSummarizeChat();
+      }
 
     }catch(err){
       typingEl.remove();
       console.error('Błąd API:', err);
       // Zamiast dopisywać błąd jako wiadomość "DARK" do historii czatu,
-      // pokazujemy osobne okno z przyciskiem do ponowienia TEGO SAMEGO zapytania.
+      // pokazujemy osobne okno z przyciskiem do ponowienia TEGO SAMEGO
+      // zapytania — i zapisujemy je, żeby przetrwało odświeżenie strony.
       showRetryBox(describeClientError(err));
     } finally {
       sendBtn.disabled = false;
       inputEl.focus();
+    }
+  }
+
+  // ---------- Auto-czyszczenie czatu: AI samo streszcza starszą część ----------
+
+  function countRawTurns(){
+    return state.messages.filter(m => m.role === 'user' || m.role === 'assistant').length;
+  }
+
+  async function maybeSummarizeChat(){
+    const rawIndexes = [];
+    state.messages.forEach((m, i) => { if(m.role === 'user' || m.role === 'assistant') rawIndexes.push(i); });
+    if(rawIndexes.length <= KEEP_RECENT_TURNS) return;
+
+    // Wszystko PRZED tym indeksem trafia do podsumowania i znika z widoku;
+    // ostatnie KEEP_RECENT_TURNS wiadomości user/assistant (i wszystko po
+    // nich — np. powiązane niespójności/propozycje) zostaje bez zmian.
+    const cutoffMessageIndex = rawIndexes[rawIndexes.length - KEEP_RECENT_TURNS];
+    const toSummarize = state.messages.slice(0, cutoffMessageIndex);
+    const segmentText = toSummarize
+      .filter(m => m.role === 'user' || m.role === 'assistant')
+      .map(m => (m.role === 'user' ? 'Użytkownik: ' : 'DARK: ') + m.content)
+      .join('\n\n');
+    if(!segmentText.trim()) return;
+
+    try{
+      const res = await fetch('/api/chat/summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ previousSummary: state.summary, segmentText })
+      });
+      const data = await res.json();
+      if(!res.ok || data.error) throw new Error(data.error || 'Błąd podsumowania.');
+
+      state.summary = data.summary;
+      state.messages = state.messages.slice(cutoffMessageIndex);
+      renderChat();
+      persist();
+    }catch(e){
+      // Ciche niepowodzenie — czat dalej działa normalnie, spróbujemy
+      // podsumować przy następnej okazji. Nie pokazujemy tego jako błąd
+      // użytkownikowi, bo to tylko porządkowanie w tle, nie odpowiedź AI.
+      console.warn('Nie udało się automatycznie podsumować czatu:', e.message);
     }
   }
 
