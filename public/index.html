@@ -169,6 +169,85 @@
   .doc-editor textarea{ min-height:130px; resize:vertical; line-height:1.6; }
   .doc-editor input:focus, .doc-editor textarea:focus{ outline:none; border-color:var(--accent-dim); }
   .doc-editor .form-actions{ display:flex; gap:10px; }
+
+  /* ---------- Delikatny scrollbar ---------- */
+  ::-webkit-scrollbar{ width:9px; height:9px; }
+  ::-webkit-scrollbar-track{ background:transparent; }
+  ::-webkit-scrollbar-thumb{ background:var(--border); border-radius:5px; }
+  ::-webkit-scrollbar-thumb:hover{ background:var(--accent-dim); }
+
+  /* ---------- Górne zakładki: Czat / Baza danych ---------- */
+  .app-tabs{ display:flex; gap:3px; background:var(--panel-alt); border:1px solid var(--border); border-radius:6px; padding:3px; position:relative; }
+  .app-tab-btn{ background:transparent; border:none; color:var(--text-muted); font-family:var(--font-mono);
+    font-size:11.5px; letter-spacing:.3px; padding:8px 16px; border-radius:4px; cursor:pointer; transition:background .15s, color .15s; }
+  .app-tab-btn:hover{ color:var(--text); }
+  .app-tab-btn.active{ background:var(--accent); color:#141210; }
+  .header-actions{ margin-left:auto; }
+
+  /* ---------- Tryb Baza danych: sidebar zajmuje całą szerokość ---------- */
+  .layout.database-mode{ grid-template-columns:1fr; }
+  .layout.database-mode main{ display:none; }
+  .layout.database-mode #sidebar{ position:static; transform:none; width:auto; max-width:none; }
+  body.database-mode #sidebarToggle, body.database-mode #sidebarBackdrop{ display:none !important; }
+
+  .layout.database-mode .sidebar-tabs{ padding:0 8px; max-width:900px; margin:0 auto; width:100%; }
+  .layout.database-mode .sidebar-head{ padding:28px 24px 18px; max-width:900px; margin:0 auto; width:100%; }
+  .layout.database-mode #entityList{ padding:16px 24px 48px; max-width:900px; margin:0 auto; width:100%; }
+  .layout.database-mode #documentTree{ padding:16px 24px 48px; max-width:760px; margin:0 auto; width:100%; }
+  .layout.database-mode .category-cards{ display:grid; grid-template-columns:repeat(auto-fill, minmax(270px,1fr)); gap:12px; }
+  .layout.database-mode .entity-card{ transition:border-color .15s; }
+  .layout.database-mode .entity-card:hover{ border-color:var(--accent-dim); }
+
+  /* ---------- Podgląd treści dokumentu ---------- */
+  .doc-preview{
+    margin:2px 0 6px 17px; padding:4px 0 4px 13px; border-left:1px solid var(--border-soft);
+    font-family:var(--font-serif); font-size:13.5px; line-height:1.7; color:var(--text-muted); white-space:pre-wrap;
+  }
+
+  /* ---------- Pływający dymek czatu (widoczny w trybie Baza danych) ---------- */
+  .chat-bubble-btn{
+    position:fixed; right:26px; bottom:26px; z-index:40;
+    width:54px; height:54px; border-radius:50%; border:1px solid var(--accent-dim);
+    background:var(--accent); color:#141210; font-size:21px; cursor:pointer;
+    box-shadow:0 6px 20px rgba(0,0,0,.45);
+    display:none; align-items:center; justify-content:center;
+    transition:transform .15s, background .15s;
+  }
+  .chat-bubble-btn:hover{ background:#DDB76A; transform:scale(1.06); }
+  body.database-mode .chat-bubble-btn{ display:flex; }
+
+  .floating-chat{
+    position:fixed; right:26px; bottom:94px; z-index:40;
+    width:min(380px, calc(100vw - 32px)); height:min(78vh, 580px);
+    background:var(--panel); border:1px solid var(--border); border-radius:10px;
+    box-shadow:0 20px 60px rgba(0,0,0,.55);
+    display:flex; flex-direction:column; overflow:hidden;
+    opacity:0; transform:translateY(10px); pointer-events:none;
+    transition:opacity .16s ease, transform .16s ease;
+  }
+  .floating-chat.open{ opacity:1; transform:translateY(0); pointer-events:auto; }
+  .floating-chat-head{
+    display:flex; align-items:center; justify-content:space-between; padding:12px 16px; flex-shrink:0;
+    border-bottom:1px solid var(--border); font-family:var(--font-mono); font-size:11.5px;
+    color:var(--text-muted); letter-spacing:.3px;
+  }
+  .floating-chat-head button{ background:transparent; border:none; color:var(--text-faint); font-size:16px; cursor:pointer; line-height:1; padding:2px; }
+  .floating-chat-head button:hover{ color:var(--accent); }
+  .floating-chat #chatPanel{ flex:1; min-height:0; }
+  .floating-chat #chat{ padding:16px; gap:14px; }
+  .floating-chat .msg{ font-size:14px; max-width:90%; }
+  .floating-chat .empty-state h2{ font-size:15.5px; }
+  .floating-chat .empty-state p{ font-size:12.5px; }
+  .floating-chat #inputRow{ padding:10px 12px; }
+  .floating-chat #inputRow textarea{ font-size:13.5px; min-height:38px; }
+  .floating-chat #sendBtn{ padding:10px 16px; font-size:12px; }
+  .floating-chat .footnote{ display:none; }
+
+  #chatPanel{ display:flex; flex-direction:column; min-height:0; flex:1; }
+
+  /* ---------- Wejście nowych wiadomości ---------- */
+  @keyframes msgIn{ from{ opacity:0; transform:translateY(4px);} to{ opacity:1; transform:translateY(0);} }
+  .msg, .inconsistency{ animation:msgIn .2s ease; }
 </style>
 </head>
 <body>
@@ -178,6 +257,10 @@
     <h1>DARK</h1>
     <p>archiwum jednostek &amp; historii</p>
   </div>
+  <div class="app-tabs">
+    <button class="app-tab-btn active" id="appTabChat">Czat</button>
+    <button class="app-tab-btn" id="appTabDatabase">Baza danych</button>
+  </div>
   <div class="header-actions">
     <button class="ghost" id="sidebarToggle">baza jednostek</button>
     <button class="ghost" id="resetBtn">resetuj archiwum</button>
@@ -186,18 +269,20 @@
 
 <div class="layout">
   <main>
-    <div id="chat">
-      <div class="empty-state" id="emptyState">
-        <h2>Zacznij pisać uniwersum DARK.</h2>
-        <p>Opisz pierwszą scenę, jednostkę, anomalię albo korporację — a ja będę rozwijać historię razem z Tobą, dopytywać o brakujące szczegóły i pilnować, żeby wszystko trzymało się logicznie.</p>
-        <p>Wszystko, co ustalimy, trafi do bazy jednostek po prawej — możesz też dopisywać i poprawiać wpisy ręcznie.</p>
+    <div id="chatPanel">
+      <div id="chat">
+        <div class="empty-state" id="emptyState">
+          <h2>Zacznij pisać uniwersum DARK.</h2>
+          <p>Opisz pierwszą scenę, jednostkę, anomalię albo korporację — a ja będę rozwijać historię razem z Tobą, dopytywać o brakujące szczegóły i pilnować, żeby wszystko trzymało się logicznie.</p>
+          <p>Wszystko, co ustalimy, trafi do bazy jednostek po prawej — możesz też dopisywać i poprawiać wpisy ręcznie.</p>
+        </div>
       </div>
+      <div id="inputRow">
+        <textarea id="userInput" placeholder="Napisz fragment historii, opisz jednostkę albo zadaj pytanie…" rows="1"></textarea>
+        <button id="sendBtn">Wyślij</button>
+      </div>
+      <div class="footnote">Aplikacja łączy się z własnym serwerem (Node.js), który bezpiecznie przekazuje zapytania do Gemini API.</div>
     </div>
-    <div id="inputRow">
-      <textarea id="userInput" placeholder="Napisz fragment historii, opisz jednostkę albo zadaj pytanie…" rows="1"></textarea>
-      <button id="sendBtn">Wyślij</button>
-    </div>
-    <div class="footnote">Aplikacja łączy się z własnym serwerem (Node.js), który bezpiecznie przekazuje zapytania do Gemini API.</div>
   </main>
 
   <div id="sidebarBackdrop"></div>
@@ -234,6 +319,14 @@
   </aside>
 </div>
 
+<button id="chatBubbleToggle" class="chat-bubble-btn" title="Otwórz czat">💬</button>
+<div id="floatingChatWrap" class="floating-chat">
+  <div class="floating-chat-head">
+    <span>Czat z DARK</span>
+    <button id="closeFloatingChat" title="Zamknij">✕</button>
+  </div>
+</div>
+
 <script>
 (function(){
   const STORAGE_KEY = 'dark-archive-state-v2';
@@ -246,6 +339,7 @@
   let editingDocId = null;
   let newDocParent; // undefined = brak formularza; null = nowy element główny; id = poddokument
   let collapsedDocs = {};
+  let expandedDocs = {};
 
   const chatEl = document.getElementById('chat');
   const emptyState = document.getElementById('emptyState');
@@ -283,6 +377,45 @@
     editingDocId = null;
     renderDocuments();
   });
+
+  // ---------- Tryb Czat / Baza danych ----------
+  const layoutEl = document.querySelector('.layout');
+  const mainEl = document.querySelector('main');
+  const chatPanelEl = document.getElementById('chatPanel');
+  const appTabChatBtn = document.getElementById('appTabChat');
+  const appTabDatabaseBtn = document.getElementById('appTabDatabase');
+  const chatBubbleToggle = document.getElementById('chatBubbleToggle');
+  const floatingChatWrap = document.getElementById('floatingChatWrap');
+  const closeFloatingChatBtn = document.getElementById('closeFloatingChat');
+
+  let appMode = 'chat';
+
+  function setAppMode(mode){
+    appMode = mode;
+    appTabChatBtn.classList.toggle('active', mode === 'chat');
+    appTabDatabaseBtn.classList.toggle('active', mode === 'database');
+    layoutEl.classList.toggle('database-mode', mode === 'database');
+    document.body.classList.toggle('database-mode', mode === 'database');
+
+    if(mode === 'chat'){
+      mainEl.appendChild(chatPanelEl);
+      floatingChatWrap.classList.remove('open');
+    } else {
+      floatingChatWrap.appendChild(chatPanelEl);
+    }
+  }
+
+  appTabChatBtn.addEventListener('click', () => setAppMode('chat'));
+  appTabDatabaseBtn.addEventListener('click', () => setAppMode('database'));
+
+  chatBubbleToggle.addEventListener('click', () => {
+    floatingChatWrap.classList.toggle('open');
+    if(floatingChatWrap.classList.contains('open')){
+      chatEl.scrollTop = chatEl.scrollHeight;
+      inputEl.focus();
+    }
+  });
+  closeFloatingChatBtn.addEventListener('click', () => floatingChatWrap.classList.remove('open'));
 
   function escapeHtml(str){
     const d = document.createElement('div');
@@ -679,10 +812,34 @@
     `;
     row.addEventListener('click', (e) => {
       if(e.target.closest('[data-action]')) return;
-      if(!hasChildren) return;
-      collapsedDocs[doc.id] = !collapsedDocs[doc.id];
-      renderDocuments();
     });
+    const arrowEl = row.querySelector('.arrow');
+    const titleEl = row.querySelector('.title');
+    if(hasChildren){
+      arrowEl.style.cursor = 'pointer';
+      arrowEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        collapsedDocs[doc.id] = !collapsedDocs[doc.id];
+        renderDocuments();
+      });
+    }
+    const hasContent = !!(doc.content && doc.content.trim());
+    if(hasContent){
+      titleEl.style.cursor = 'pointer';
+      titleEl.title = 'Kliknij, aby zobaczyć treść';
+      titleEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        expandedDocs[doc.id] = !expandedDocs[doc.id];
+        renderDocuments();
+      });
+    } else if(hasChildren){
+      titleEl.style.cursor = 'pointer';
+      titleEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        collapsedDocs[doc.id] = !collapsedDocs[doc.id];
+        renderDocuments();
+      });
+    }
     row.querySelector('[data-action="add-child"]').addEventListener('click', (e) => {
       e.stopPropagation();
       newDocParent = doc.id;
@@ -708,6 +865,13 @@
     });
 
     wrap.appendChild(row);
+
+    if(expandedDocs[doc.id] && hasContent){
+      const preview = document.createElement('div');
+      preview.className = 'doc-preview';
+      preview.textContent = doc.content;
+      wrap.appendChild(preview);
+    }
 
     if(newDocParent === doc.id){
       const formWrap = document.createElement('div');
@@ -760,10 +924,11 @@
       '',
       'Twoja rola w rozmowie:',
       '1. Współtworzysz fabułę i opisy jednostek razem z użytkownikiem. Rozwijasz to, co zaproponuje, zamiast pisać za niego całe rozdziały.',
-      '2. Gdy pojawia się nowa jednostka, organizacja, anomalia lub postać — NIE akceptuj jej biernie. Dopytaj o brakujące elementy (cel, motywacje, strukturę, zasoby, ograniczenia), jeśli nie zostały podane. Możesz zaproponować własne pomysły, ale zawsze zaznacz, że to propozycja do wyboru, a nie gotowa decyzja.',
-      '3. Aktywnie szukaj luk logicznych i sprzeczności między nową treścią a bazą danych podaną niżej. Zgłaszaj je wprost i konkretnie, nie przemilczaj ich z uprzejmości.',
-      '4. Na bieżąco aktualizuj strukturalną bazę jednostek — za każdym razem, gdy w rozmowie pojawi się nowa jednostka albo zmieni się coś w istniejącej.',
-      '5. Utrzymuj bazę uporządkowaną: każdej jednostce przypisuj DOKŁADNIE jedną z kategorii: ' + CATEGORIES.join(', ') + '. Jeśli jednostka jest częścią większej organizacji, wypełnij pole "nadrzedna" nazwą tej organizacji. Jeśli świat ma system klasyfikacji tajności, wypełniaj pole "tajnosc" zgodnie z nim; jeśli nie ma zastosowania, zostaw puste.',
+      '2. Gdy pojawia się nowa jednostka, organizacja, anomalia lub postać — NIE akceptuj jej biernie. W każdej turze, w której to możliwe, dołóż: (a) przynajmniej jedno konkretne pytanie doprecyzowujące o brakujący element (cel, motywacje, strukturę, zasoby, ograniczenia, konsekwencje) ORAZ (b) przynajmniej jedną własną uwagę, spostrzeżenie albo sugestię — nie tylko pytaj, ale też oceniaj, komentuj, zauważaj ciekawe tropy albo napięcia w tym, co powstaje. Zawsze zaznacz, że Twoje pomysły to propozycje do wyboru, a nie gotowe decyzje.',
+      '3. Różnicuj formę pytań i uwag z tury na turę — nie powtarzaj tego samego schematu za każdym razem. Czasem zadaj wprost pytanie otwarte, czasem zaproponuj dwie konkretne alternatywy do wyboru, czasem podważ jakiś szczegół pytaniem "a co jeśli...", czasem po prostu zwróć uwagę na coś ciekawego, co użytkownik dopiero zasugerował, zamiast pytać. Traktuj to jak żywą rozmowę kreatywną między współautorami, a nie formularz do wypełnienia.',
+      '4. Aktywnie szukaj luk logicznych i sprzeczności między nową treścią a bazą danych podaną niżej. Zgłaszaj je wprost i konkretnie, nie przemilczaj ich z uprzejmości.',
+      '5. Na bieżąco aktualizuj strukturalną bazę jednostek — za każdym razem, gdy w rozmowie pojawi się nowa jednostka albo zmieni się coś w istniejącej.',
+      '6. Utrzymuj bazę uporządkowaną: każdej jednostce przypisuj DOKŁADNIE jedną z kategorii: ' + CATEGORIES.join(', ') + '. Jeśli jednostka jest częścią większej organizacji, wypełnij pole "nadrzedna" nazwą tej organizacji. Jeśli świat ma system klasyfikacji tajności, wypełniaj pole "tajnosc" zgodnie z nim; jeśli nie ma zastosowania, zostaw puste.',
       '',
       'Aktualna baza danych jednostek (JSON):',
       entitiesJson,
