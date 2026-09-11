@@ -308,6 +308,7 @@ app.post('/api/chat', asyncRoute(async (req, res) => {
 
     let parsed;
     let parseFailed = false;
+    let truncated = false;
     try {
       parsed = JSON.parse(clean);
     } catch (e) {
@@ -319,18 +320,26 @@ app.post('/api/chat', asyncRoute(async (req, res) => {
       // "entities" — żeby retry na MAX_TOKENS + ten fallback razem dawały
       // jak najmniejszą szansę na utratę całej tury.
       const salvaged = salvageEntitiesFromTruncatedJson(clean);
+      const partialReply = extractPartialStringField(clean, 'reply');
 
-      let hint = 'Nie udało się odczytać odpowiedzi.';
-      if (finishReason === 'SAFETY') hint = 'Odpowiedź została zablokowana przez filtry bezpieczeństwa Gemini (finishReason: SAFETY).';
-      else if (finishReason === 'MAX_TOKENS') {
-        hint = salvaged.length
-          ? `Odpowiedź została ucięta mimo automatycznych ponowień (finishReason: MAX_TOKENS). Udało się jednak odzyskać ${salvaged.length} jednostek z uciętej odpowiedzi — zostały zapisane. Spróbuj krótszej wiadomości albo poproś o mniej jednostek naraz.`
-          : 'Odpowiedź została ucięta, bo przekroczyła limit tokenów (finishReason: MAX_TOKENS) — spróbuj krótszej wiadomości.';
+      if (finishReason === 'MAX_TOKENS' && partialReply && partialReply.text.trim()) {
+        // Mamy kawałek realnej treści od modelu (choć niedokończony) —
+        // pokaż go użytkownikowi zamiast suchego błędu i pozwól kontynuować.
+        truncated = true;
+        parsed = { reply: partialReply.text.trim(), entities: salvaged, inconsistencies: [] };
+      } else {
+        let hint = 'Nie udało się odczytać odpowiedzi.';
+        if (finishReason === 'SAFETY') hint = 'Odpowiedź została zablokowana przez filtry bezpieczeństwa Gemini (finishReason: SAFETY).';
+        else if (finishReason === 'MAX_TOKENS') {
+          hint = salvaged.length
+            ? `Odpowiedź została ucięta mimo automatycznych ponowień (finishReason: MAX_TOKENS). Udało się jednak odzyskać ${salvaged.length} jednostek z uciętej odpowiedzi — zostały zapisane. Spróbuj krótszej wiadomości albo poproś o mniej jednostek naraz.`
+            : 'Odpowiedź została ucięta, bo przekroczyła limit tokenów (finishReason: MAX_TOKENS) — spróbuj krótszej wiadomości.';
+        }
+        else if (finishReason === 'RECITATION') hint = 'Gemini odmówił odpowiedzi z powodu podejrzenia o cytowanie chronionej treści (finishReason: RECITATION).';
+        else if (!raw) hint = `Model nie zwrócił żadnej treści (finishReason: ${finishReason || 'nieznany'}).`;
+
+        parsed = { reply: hint, entities: salvaged, inconsistencies: [] };
       }
-      else if (finishReason === 'RECITATION') hint = 'Gemini odmówił odpowiedzi z powodu podejrzenia o cytowanie chronionej treści (finishReason: RECITATION).';
-      else if (!raw) hint = `Model nie zwrócił żadnej treści (finishReason: ${finishReason || 'nieznany'}).`;
-
-      parsed = { reply: hint, entities: salvaged, inconsistencies: [] };
     }
 
     const entities = Array.isArray(parsed.entities) ? parsed.entities : [];
@@ -361,11 +370,51 @@ app.post('/api/chat', asyncRoute(async (req, res) => {
       entities,
       inconsistencies: Array.isArray(parsed.inconsistencies) ? parsed.inconsistencies : [],
       parseFailed,
+      // Gdy true: odpowiedź jest realna, ale niedokończona (ucięta na MAX_TOKENS
+      // nawet po automatycznych ponowieniach). Frontend powinien pokazać
+      // przycisk "Kontynuuj", który wyśle nową turę z prośbą o dociągnięcie
+      // dalszej części — patrz sekcja we frontendzie.
+      truncated,
     });
   } catch (err) {
     res.status(502).json({ error: 'Nie udało się połączyć z Gemini: ' + err.message });
   }
 }));
+
+// Próbuje wyciągnąć wartość string-owego pola (np. "reply") z uciętego,
+// niepoprawnego JSON-a — nawet jeśli string urwał się w połowie, bez
+// domykającego cudzysłowu. Zwraca odzyskany tekst + informację, czy string
+// zdążył się poprawnie domknąć.
+function extractPartialStringField(text, key) {
+  const marker = `"${key}"`;
+  const markerIdx = text.indexOf(marker);
+  if (markerIdx === -1) return null;
+
+  let i = text.indexOf(':', markerIdx + marker.length);
+  if (i === -1) return null;
+  i++;
+  while (i < text.length && /\s/.test(text[i])) i++;
+  if (text[i] !== '"') return null;
+  i++; // pomiń otwierający cudzysłów
+
+  let result = '';
+  let escape = false;
+  for (; i < text.length; i++) {
+    const ch = text[i];
+    if (escape) {
+      if (ch === 'n') result += '\n';
+      else if (ch === 't') result += '\t';
+      else if (ch === 'r') result += '\r';
+      else result += ch; // ", \\, /, itd.
+      escape = false;
+      continue;
+    }
+    if (ch === '\\') { escape = true; continue; }
+    if (ch === '"') return { text: result, complete: true };
+    result += ch;
+  }
+  return { text: result, complete: false }; // koniec tekstu bez domknięcia -> ucięte w połowie
+}
 
 // Próbuje wyciągnąć kompletne obiekty jednostek z tablicy "entities" wewnątrz
 // uciętego (niepoprawnego) JSON-a. Działa na zasadzie zliczania nawiasów
