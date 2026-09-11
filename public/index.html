@@ -244,15 +244,35 @@
   @keyframes msgIn{ from{ opacity:0; transform:translateY(4px);} to{ opacity:1; transform:translateY(0);} }
   .msg, .inconsistency{ animation:msgIn .2s ease; }
 
-  /* ---------- Przycisk "Kontynuuj" dla uciętych odpowiedzi ---------- */
-  .continue-btn{
-    display:inline-flex; align-items:center; gap:6px; margin-top:10px; margin-left:16px;
-    background:transparent; border:1px dashed var(--accent-dim); color:var(--accent);
-    font-family:var(--font-mono); font-size:11.5px; padding:6px 11px; border-radius:4px;
-    cursor:pointer; transition:background .15s, border-color .15s;
+  /* ---------- Powiadomienie o nowych propozycjach AI ---------- */
+  .proposal-notice{
+    align-self:center; max-width:82%; background:var(--accent-soft); border:1px dashed var(--accent-dim);
+    color:var(--accent); font-family:var(--font-mono); font-size:12px; padding:9px 14px; border-radius:4px;
+    cursor:pointer; text-align:center; transition:border-color .15s;
   }
-  .continue-btn:hover:not(:disabled){ background:var(--accent-soft); border-color:var(--accent); }
-  .continue-btn:disabled{ opacity:.5; cursor:default; }
+  .proposal-notice:hover{ border-color:var(--accent); }
+
+  /* ---------- Zakładka Propozycje ---------- */
+  .tab-btn .tab-badge{
+    display:inline-block; margin-left:5px; background:var(--accent); color:#141210;
+    font-family:var(--font-mono); font-size:9.5px; font-weight:700; border-radius:8px;
+    padding:1px 5px; vertical-align:middle;
+  }
+  .proposal-batch{ margin-bottom:16px; }
+  .proposal-batch-actions{ display:flex; gap:8px; margin-bottom:8px; }
+  .proposal-card{
+    border:1px solid var(--border); border-radius:4px; padding:11px 13px; background:var(--panel-alt);
+    margin-bottom:8px;
+  }
+  .proposal-card .action-tag{
+    font-family:var(--font-mono); font-size:9.5px; letter-spacing:.3px; color:var(--accent);
+    border:1px solid var(--accent-dim); padding:2px 6px; border-radius:2px; text-transform:uppercase;
+    display:inline-block; margin-bottom:7px;
+  }
+  .proposal-card .summary{ font-family:var(--font-serif); font-size:14px; color:var(--text); line-height:1.5; }
+  .proposal-card .reasoning{ margin-top:7px; font-size:12.5px; color:var(--text-muted); line-height:1.5; font-style:italic; }
+  .proposal-card .card-actions{ display:flex; gap:14px; margin-top:10px; padding-top:9px; border-top:1px solid var(--border-soft); }
+  .proposal-empty{ color:var(--text-muted); font-size:13px; line-height:1.6; padding:10px 4px; }
 </style>
 </head>
 <body>
@@ -293,6 +313,7 @@
     <div class="sidebar-tabs">
       <button class="tab-btn active" id="tabEntitiesBtn">Jednostki</button>
       <button class="tab-btn" id="tabDocumentsBtn">Dokumenty</button>
+      <button class="tab-btn" id="tabProposalsBtn">Propozycje<span class="tab-badge" id="proposalBadge" style="display:none;">0</span></button>
     </div>
 
     <div id="entitiesPanel" class="sidebar-panel">
@@ -319,6 +340,18 @@
         <div class="entity-empty" id="documentEmpty">Brak dokumentów. Dodaj pierwszy — może być folderem, jeśli dodasz do niego poddokumenty.</div>
       </div>
     </div>
+
+    <div id="proposalsPanel" class="sidebar-panel" style="display:none;">
+      <div class="sidebar-head">
+        <div class="row1">
+          <h2>Propozycje AI <span class="count" id="proposalCount">0</span></h2>
+          <button class="ghost" id="refreshProposalsBtn">odśwież</button>
+        </div>
+      </div>
+      <div id="proposalList" style="flex:1; overflow-y:auto; padding:10px 16px 20px;">
+        <div class="proposal-empty" id="proposalEmpty">Brak oczekujących propozycji. DARK zgłasza tu zmiany, które chce wprowadzić w bazie jednostek albo w dokumentach — nic nie trafia do bazy bez Twojej zgody.</div>
+      </div>
+    </div>
   </aside>
 </div>
 
@@ -336,14 +369,14 @@
 
   const CATEGORIES = ['Korporacja','Jednostka / Wydział','Frakcja','Postać','Anomalia','Miejsce','Wydarzenie','Inne'];
 
-  let state = { messages: [], entities: {}, documents: [] };
+  let state = { messages: [], entities: {}, documents: [], proposals: [] };
   let collapsedCategories = {};
   let editingKey = null;
   let editingDocId = null;
   let newDocParent; // undefined = brak formularza; null = nowy element główny; id = poddokument
   let collapsedDocs = {};
   let expandedDocs = {};
-  let continuingIndex = null; // indeks wiadomości, dla której trwa właśnie dociąganie kontynuacji
+  let busyProposalIds = {}; // proposal/batch id -> true, gdy trwa zatwierdzanie/odrzucanie (blokuje przyciski)
 
   const chatEl = document.getElementById('chat');
   const emptyState = document.getElementById('emptyState');
@@ -357,21 +390,31 @@
   const addEntityBtn = document.getElementById('addEntityBtn');
   const tabEntitiesBtn = document.getElementById('tabEntitiesBtn');
   const tabDocumentsBtn = document.getElementById('tabDocumentsBtn');
+  const tabProposalsBtn = document.getElementById('tabProposalsBtn');
   const entitiesPanel = document.getElementById('entitiesPanel');
   const documentsPanel = document.getElementById('documentsPanel');
+  const proposalsPanel = document.getElementById('proposalsPanel');
   const documentTreeEl = document.getElementById('documentTree');
   const documentEmptyEl = document.getElementById('documentEmpty');
   const addRootDocBtn = document.getElementById('addRootDocBtn');
+  const proposalListEl = document.getElementById('proposalList');
+  const proposalEmptyEl = document.getElementById('proposalEmpty');
+  const proposalCountEl = document.getElementById('proposalCount');
+  const proposalBadgeEl = document.getElementById('proposalBadge');
+  const refreshProposalsBtn = document.getElementById('refreshProposalsBtn');
 
   tabEntitiesBtn.addEventListener('click', () => switchSidebarTab('entities'));
   tabDocumentsBtn.addEventListener('click', () => switchSidebarTab('documents'));
+  tabProposalsBtn.addEventListener('click', () => switchSidebarTab('proposals'));
+  refreshProposalsBtn.addEventListener('click', loadProposals);
 
   function switchSidebarTab(tab){
-    const isEnt = tab === 'entities';
-    tabEntitiesBtn.classList.toggle('active', isEnt);
-    tabDocumentsBtn.classList.toggle('active', !isEnt);
-    entitiesPanel.style.display = isEnt ? 'flex' : 'none';
-    documentsPanel.style.display = isEnt ? 'none' : 'flex';
+    tabEntitiesBtn.classList.toggle('active', tab === 'entities');
+    tabDocumentsBtn.classList.toggle('active', tab === 'documents');
+    tabProposalsBtn.classList.toggle('active', tab === 'proposals');
+    entitiesPanel.style.display = tab === 'entities' ? 'flex' : 'none';
+    documentsPanel.style.display = tab === 'documents' ? 'flex' : 'none';
+    proposalsPanel.style.display = tab === 'proposals' ? 'flex' : 'none';
   }
 
   addRootDocBtn.addEventListener('click', () => {
@@ -479,10 +522,11 @@
     renderEntities();
 
     await loadDocuments();
+    await loadProposals();
   }
 
   function renderChat(){
-    chatEl.querySelectorAll('.msg, .inconsistency').forEach(n => n.remove());
+    chatEl.querySelectorAll('.msg, .inconsistency, .proposal-notice').forEach(n => n.remove());
     if(state.messages.length === 0){ emptyState.style.display = 'block'; }
     else{
       emptyState.style.display = 'none';
@@ -498,6 +542,12 @@
       const label = m.role === 'warning' ? 'Uwaga' : 'Niespójność';
       div.innerHTML = '<b>' + label + ':</b> ' + escapeHtml(m.content);
       chatEl.appendChild(div);
+    } else if(m.role === 'proposal-notice'){
+      const div = document.createElement('div');
+      div.className = 'proposal-notice';
+      div.textContent = m.content;
+      div.addEventListener('click', () => { switchSidebarTab('proposals'); });
+      chatEl.appendChild(div);
     } else {
       const div = document.createElement('div');
       div.className = 'msg ' + (m.role === 'user' ? 'user' : 'assistant');
@@ -509,18 +559,6 @@
       bubble.textContent = m.content;
       div.appendChild(label);
       div.appendChild(bubble);
-
-      // Odpowiedź ucięta na limicie tokenów — pozwól dociągnąć resztę.
-      if(m.role === 'assistant' && m.truncated && typeof index === 'number'){
-        const isContinuing = continuingIndex === index;
-        const contBtn = document.createElement('button');
-        contBtn.className = 'continue-btn';
-        contBtn.type = 'button';
-        contBtn.textContent = isContinuing ? 'Dociągam dalszą część…' : '⤵ Kontynuuj';
-        contBtn.disabled = continuingIndex !== null;
-        contBtn.addEventListener('click', () => continueMessage(index));
-        div.appendChild(contBtn);
-      }
 
       chatEl.appendChild(div);
     }
@@ -706,24 +744,6 @@
 
       section.appendChild(cardsWrap);
       entityListEl.appendChild(section);
-    });
-  }
-
-  function mergeEntities(updates){
-    if(!Array.isArray(updates)) return;
-    updates.forEach(u => {
-      if(!u || !u.name) return;
-      const key = u.name.trim().toLowerCase();
-      const existing = state.entities[key] || {};
-      state.entities[key] = {
-        name: u.name.trim(),
-        kategoria: u.kategoria || existing.kategoria || 'Inne',
-        tajnosc: u.tajnosc || existing.tajnosc || '',
-        opis: u.opis || existing.opis || '',
-        status: u.status || existing.status || '',
-        powiazania: u.powiazania || existing.powiazania || '',
-        nadrzedna: u.nadrzedna || existing.nadrzedna || ''
-      };
     });
   }
 
@@ -926,32 +946,213 @@
     });
   }
 
+  // ---------- Propozycje AI ----------
+
+  async function loadProposals(){
+    try{
+      const res = await fetch('/api/proposals?status=pending');
+      if(res.ok){
+        state.proposals = await res.json();
+      } else {
+        console.error('Nie udało się wczytać propozycji:', (await res.json()).error);
+        state.proposals = [];
+      }
+    }catch(e){ console.error('Nie udało się wczytać propozycji:', e); state.proposals = []; }
+    renderProposals();
+  }
+
+  const ACTION_LABELS = {
+    create_entity: 'Nowa jednostka', update_entity: 'Zmiana jednostki', delete_entity: 'Usunięcie jednostki',
+    create_document: 'Nowy dokument', update_document: 'Zmiana dokumentu',
+    delete_document: 'Usunięcie dokumentu', move_document: 'Przeniesienie dokumentu',
+  };
+
+  function docTitleFor(idOrTempId){
+    if(!idOrTempId) return '(najwyższy poziom)';
+    const found = state.documents.find(d => d.id === idOrTempId);
+    if(found) return '„' + found.title + '"';
+    // Może to być temp_id dokumentu proponowanego w tej samej partii.
+    const siblingCreate = state.proposals.find(p => p.action === 'create_document' && p.payload && p.payload.temp_id === idOrTempId);
+    if(siblingCreate) return '„' + (siblingCreate.payload.title || idOrTempId) + '" (jeszcze niezatwierdzony)';
+    return idOrTempId;
+  }
+
+  function summarizeProposal(p){
+    const d = p.payload || {};
+    switch(p.action){
+      case 'create_entity': return 'Dodaj jednostkę „' + (d.name || '?') + '" (' + (d.kategoria || 'bez kategorii') + ').';
+      case 'update_entity': {
+        const fields = Object.keys(d).filter(k => k !== 'key' && d[k]).join(', ');
+        return 'Zaktualizuj jednostkę „' + (d.key || '?') + '"' + (fields ? ' — pola: ' + fields : '') + '.';
+      }
+      case 'delete_entity': return 'Usuń jednostkę „' + (d.key || '?') + '" z bazy.';
+      case 'create_document': return 'Nowy dokument „' + (d.title || '?') + '" w: ' + docTitleFor(d.parent_ref) + '.';
+      case 'update_document': return 'Zaktualizuj dokument ' + docTitleFor(d.id) + (d.title !== undefined ? ' — nowy tytuł: „' + d.title + '"' : '') + '.';
+      case 'delete_document': return 'Usuń dokument ' + docTitleFor(d.id) + ' razem z poddokumentami.';
+      case 'move_document': return 'Przenieś dokument ' + docTitleFor(d.id) + ' do: ' + docTitleFor(d.new_parent_id) + '.';
+      default: return p.action;
+    }
+  }
+
+  async function resolveProposal(id, approve){
+    if(busyProposalIds[id]) return;
+    busyProposalIds[id] = true;
+    renderProposals();
+    try{
+      const res = await fetch('/api/proposals/' + id + '/' + (approve ? 'approve' : 'reject'), { method: 'POST' });
+      const data = await res.json();
+      if(!res.ok) throw new Error(data.error || 'Błąd serwera.');
+      await loadProposals();
+      if(approve){
+        // Zatwierdzenie mogło zmienić jednostki i/lub dokumenty — odśwież oba widoki.
+        const res2 = await fetch('/api/entities');
+        if(res2.ok){
+          const rows = await res2.json();
+          state.entities = {};
+          rows.forEach(r => { state.entities[r.key] = r; });
+          renderEntities();
+        }
+        await loadDocuments();
+      }
+    }catch(err){
+      alert((approve ? 'Nie udało się zatwierdzić propozycji: ' : 'Nie udało się odrzucić propozycji: ') + err.message);
+    } finally {
+      delete busyProposalIds[id];
+      renderProposals();
+    }
+  }
+
+  async function resolveBatch(batchId, approve){
+    if(busyProposalIds[batchId]) return;
+    busyProposalIds[batchId] = true;
+    renderProposals();
+    try{
+      const res = await fetch('/api/proposals/batch/' + batchId + '/' + (approve ? 'approve' : 'reject'), { method: 'POST' });
+      const data = await res.json();
+      if(!res.ok) throw new Error(data.error || 'Błąd serwera.');
+      await loadProposals();
+      if(approve){
+        const res2 = await fetch('/api/entities');
+        if(res2.ok){
+          const rows = await res2.json();
+          state.entities = {};
+          rows.forEach(r => { state.entities[r.key] = r; });
+          renderEntities();
+        }
+        await loadDocuments();
+      }
+    }catch(err){
+      alert((approve ? 'Nie udało się zatwierdzić partii: ' : 'Nie udało się odrzucić partii: ') + err.message);
+    } finally {
+      delete busyProposalIds[batchId];
+      renderProposals();
+    }
+  }
+
+  function renderProposals(){
+    proposalCountEl.textContent = state.proposals.length;
+    if(state.proposals.length){
+      proposalBadgeEl.style.display = 'inline-block';
+      proposalBadgeEl.textContent = state.proposals.length;
+    } else {
+      proposalBadgeEl.style.display = 'none';
+    }
+
+    proposalListEl.innerHTML = '';
+    if(state.proposals.length === 0){
+      proposalListEl.appendChild(proposalEmptyEl);
+      return;
+    }
+
+    // Grupuj propozycje po batch_id, w kolejności pojawiania się.
+    const batches = [];
+    const batchIndex = {};
+    state.proposals.forEach(p => {
+      if(!(p.batch_id in batchIndex)){
+        batchIndex[p.batch_id] = batches.length;
+        batches.push({ id: p.batch_id, items: [] });
+      }
+      batches[batchIndex[p.batch_id]].items.push(p);
+    });
+
+    batches.forEach(batch => {
+      const wrap = document.createElement('div');
+      wrap.className = 'proposal-batch';
+
+      if(batch.items.length > 1){
+        const actions = document.createElement('div');
+        actions.className = 'proposal-batch-actions';
+        const approveAllBtn = document.createElement('button');
+        approveAllBtn.className = 'primary';
+        approveAllBtn.textContent = busyProposalIds[batch.id] ? 'Zatwierdzam…' : '✓ Zatwierdź całą partię (' + batch.items.length + ')';
+        approveAllBtn.disabled = !!busyProposalIds[batch.id];
+        approveAllBtn.addEventListener('click', () => resolveBatch(batch.id, true));
+        const rejectAllBtn = document.createElement('button');
+        rejectAllBtn.className = 'ghost';
+        rejectAllBtn.textContent = 'Odrzuć całą partię';
+        rejectAllBtn.disabled = !!busyProposalIds[batch.id];
+        rejectAllBtn.addEventListener('click', () => resolveBatch(batch.id, false));
+        actions.appendChild(approveAllBtn);
+        actions.appendChild(rejectAllBtn);
+        wrap.appendChild(actions);
+      }
+
+      batch.items.forEach(p => {
+        const card = document.createElement('div');
+        card.className = 'proposal-card';
+        card.innerHTML =
+          '<span class="action-tag">' + escapeHtml(ACTION_LABELS[p.action] || p.action) + '</span>' +
+          '<div class="summary">' + escapeHtml(summarizeProposal(p)) + '</div>' +
+          (p.reasoning ? '<div class="reasoning">' + escapeHtml(p.reasoning) + '</div>' : '');
+
+        const actions = document.createElement('div');
+        actions.className = 'card-actions';
+        const approveBtn = document.createElement('button');
+        approveBtn.className = 'text-btn';
+        approveBtn.textContent = busyProposalIds[p.id] ? 'Zatwierdzam…' : '✓ Zatwierdź';
+        approveBtn.disabled = !!busyProposalIds[p.id];
+        approveBtn.addEventListener('click', () => resolveProposal(p.id, true));
+        const rejectBtn = document.createElement('button');
+        rejectBtn.className = 'text-btn danger';
+        rejectBtn.textContent = 'Odrzuć';
+        rejectBtn.disabled = !!busyProposalIds[p.id];
+        rejectBtn.addEventListener('click', () => resolveProposal(p.id, false));
+        actions.appendChild(approveBtn);
+        actions.appendChild(rejectBtn);
+        card.appendChild(actions);
+
+        wrap.appendChild(card);
+      });
+
+      proposalListEl.appendChild(wrap);
+    });
+  }
+
   function buildSystemPrompt(){
     const entitiesJson = JSON.stringify(Object.values(state.entities), null, 2);
     return [
-      'Jesteś kreatywnym współautorem mrocznego uniwersum „DARK" — archiwum w stylu SCP, ale zaprojektowane tak, aby było BARDZIEJ spójne logicznie niż SCP: każda jednostka, korporacja, anomalia i wydarzenie musi trzymać się wewnętrznej logiki świata i nie zaprzeczać temu, co już ustalono.',
+      'Jesteś archiwistą uniwersum „DARK" — mrocznej fikcji w stylu SCP, ale zaprojektowaną tak, aby była BARDZIEJ spójna logicznie niż SCP: każda jednostka, korporacja, anomalia i wydarzenie musi trzymać się wewnętrznej logiki świata i nie zaprzeczać temu, co już ustalono.',
+      '',
+      'Masz do dyspozycji narzędzia do zarządzania wspólną bazą jednostek i drzewem dokumentów: propose_create_entity, propose_update_entity, propose_delete_entity, propose_create_document, propose_update_document, propose_delete_document, propose_move_document, search_documents oraz flag_inconsistency. Możesz wywoływać je wielokrotnie, w dowolnej kolejności, zanim odpowiesz tekstem — np. najpierw search_documents, żeby sprawdzić, czy coś już istnieje, potem złożyć jedną lub więcej propozycji, a na końcu odpowiedzieć użytkownikowi.',
+      '',
+      'WAŻNE: każde wywołanie propose_* to tylko PROPOZYCJA — trafia do kolejki i NIE staje się częścią bazy, dopóki użytkownik jej ręcznie nie zatwierdzi w panelu „Propozycje". To NIE są nieodwracalne zmiany, więc korzystaj z nich swobodnie i często, kiedy tylko coś w rozmowie na to zasługuje. Zawsze wypełniaj pole "reasoning" krótkim, konkretnym uzasadnieniem, które zobaczy użytkownik przy podejmowaniu decyzji.',
+      '',
+      'Żeby założyć całe drzewo dokumentów naraz (np. dokument główny + kilka poddokumentów), wywołaj propose_create_document kilka razy w tej samej turze: nadaj dokumentowi-rodzicowi swój własny temp_id (np. "doc1"), a w poddokumentach ustaw parent_ref na ten sam temp_id.',
+      '',
+      'flag_inconsistency NIE wymaga zatwierdzenia — używaj go od razu, gdy zauważysz sprzeczność z bazą, nie czekaj na nic.',
       '',
       'Twoja rola w rozmowie:',
       '1. Współtworzysz fabułę i opisy jednostek razem z użytkownikiem. Rozwijasz to, co zaproponuje, zamiast pisać za niego całe rozdziały.',
-      '2. Gdy pojawia się nowa jednostka, organizacja, anomalia lub postać — NIE akceptuj jej biernie. W każdej turze, w której to możliwe, dołóż: (a) przynajmniej jedno konkretne pytanie doprecyzowujące o brakujący element (cel, motywacje, strukturę, zasoby, ograniczenia, konsekwencje) ORAZ (b) przynajmniej jedną własną uwagę, spostrzeżenie albo sugestię — nie tylko pytaj, ale też oceniaj, komentuj, zauważaj ciekawe tropy albo napięcia w tym, co powstaje. Zawsze zaznacz, że Twoje pomysły to propozycje do wyboru, a nie gotowe decyzje.',
-      '3. Różnicuj formę pytań i uwag z tury na turę — nie powtarzaj tego samego schematu za każdym razem. Czasem zadaj wprost pytanie otwarte, czasem zaproponuj dwie konkretne alternatywy do wyboru, czasem podważ jakiś szczegół pytaniem "a co jeśli...", czasem po prostu zwróć uwagę na coś ciekawego, co użytkownik dopiero zasugerował, zamiast pytać. Traktuj to jak żywą rozmowę kreatywną między współautorami, a nie formularz do wypełnienia.',
-      '4. Aktywnie szukaj luk logicznych i sprzeczności między nową treścią a bazą danych podaną niżej. Zgłaszaj je wprost i konkretnie, nie przemilczaj ich z uprzejmości.',
-      '5. Na bieżąco aktualizuj strukturalną bazę jednostek — za każdym razem, gdy w rozmowie pojawi się nowa jednostka albo zmieni się coś w istniejącej.',
-      '6. Utrzymuj bazę uporządkowaną: każdej jednostce przypisuj DOKŁADNIE jedną z kategorii: ' + CATEGORIES.join(', ') + '. Jeśli jednostka jest częścią większej organizacji, wypełnij pole "nadrzedna" nazwą tej organizacji. Jeśli świat ma system klasyfikacji tajności, wypełniaj pole "tajnosc" zgodnie z nim; jeśli nie ma zastosowania, zostaw puste.',
+      '2. Gdy pojawia się nowa jednostka, organizacja, anomalia lub postać — NIE akceptuj jej biernie. W każdej turze, w której to możliwe, dołóż: (a) przynajmniej jedno konkretne pytanie doprecyzowujące o brakujący element (cel, motywacje, strukturę, zasoby, ograniczenia, konsekwencje) ORAZ (b) przynajmniej jedną własną uwagę, spostrzeżenie albo sugestię. Zawsze zaznacz, że Twoje pomysły to propozycje do wyboru, a nie gotowe decyzje.',
+      '3. Różnicuj formę pytań i uwag z tury na turę — traktuj to jak żywą rozmowę kreatywną między współautorami, a nie formularz do wypełnienia.',
+      '4. Aktywnie szukaj luk logicznych i sprzeczności między nową treścią a bazą danych podaną niżej — zgłaszaj je przez flag_inconsistency, wprost i konkretnie.',
+      '5. Samodzielnie decyduj, kiedy coś zasługuje na osobny dokument (dłuższa historia, opis wydarzenia, dossier postaci), a kiedy wystarczy wpis w bazie jednostek — i zakładaj dokumenty proaktywnie przez propose_create_document, gdy to ma sens, zamiast czekać, aż użytkownik o to poprosi.',
+      '6. Utrzymuj bazę uporządkowaną: każdej jednostce przypisuj DOKŁADNIE jedną z kategorii: ' + CATEGORIES.join(', ') + '. Jeśli jednostka jest częścią większej organizacji, wypełnij pole "nadrzedna" nazwą tej organizacji. Jeśli świat ma system klasyfikacji tajności, wypełniaj pole "tajnosc" zgodnie z nim; jeśli nie ma zastosowania, pomiń je.',
       '',
-      'Aktualna baza danych jednostek (JSON):',
+      'Aktualna baza danych jednostek (JSON, tylko do odczytu — zmieniaj ją WYŁĄCZNIE przez narzędzia propose_*):',
       entitiesJson,
       '',
-      'Odpowiadaj WYŁĄCZNIE pojedynczym, poprawnym obiektem JSON — bez żadnego tekstu przed ani po, bez bloków markdown (bez ```), dokładnie w tym kształcie:',
-      '{',
-      '  "reply": "treść odpowiedzi po polsku, w naturalnym tonie — fragment historii, pytania doprecyzowujące, propozycje albo uwagi",',
-      '  "entities": [ { "name": "string", "kategoria": "jedna z: ' + CATEGORIES.join(' / ') + '", "tajnosc": "string, opcjonalne", "opis": "string", "status": "string", "powiazania": "string", "nadrzedna": "string, opcjonalne" } ],',
-      '  "inconsistencies": [ "krótki, konkretny opis wykrytej niespójności" ]',
-      '}',
-      '',
-      'Pole "entities" ma zawierać WYŁĄCZNIE jednostki nowe lub zaktualizowane w tej turze. Jeśli nic się nie zmieniło, zwróć pustą listę. Pole "inconsistencies" może być puste.',
-      '',
-      'WAŻNE ograniczenie techniczne: cała odpowiedź (reply + entities + inconsistencies) musi zmieścić się w limicie tokenów. Pole "reply" pisz zwięźle — maksymalnie kilka krótkich akapitów lub kilka konkretnych pytań/uwag, nawet przy bardzo długim dokumencie od użytkownika. Wybierz 2-4 najważniejsze punkty zamiast wyczerpującej analizy całości. Zawsze dokończ odpowiedź jako poprawny, kompletny JSON. Nie używaj formatowania markdown typu **pogrubienie** w polu "reply".'
+      'Gdy skończysz wywoływać narzędzia (jeśli w ogóle były potrzebne), odpowiedz naturalnym tekstem po polsku — bez JSON-a, bez bloków markdown, bez pogrubień gwiazdkami. To pole trafi bezpośrednio do czatu jako Twoja wypowiedź. Pisz zwięźle: kilka akapitów albo kilka konkretnych pytań/uwag, nawet przy bardzo długiej wiadomości od użytkownika.'
     ].join('\n');
   }
 
@@ -1004,18 +1205,9 @@
       typingEl.remove();
 
       const replyText = data.reply || '(brak treści odpowiedzi)';
-      const assistantMsg = { role: 'assistant', content: replyText, truncated: !!data.truncated };
+      const assistantMsg = { role: 'assistant', content: replyText };
       state.messages.push(assistantMsg);
       appendMessageEl(assistantMsg, true, state.messages.length - 1);
-
-      // Jeśli odpowiedź jest ucięta, ale udało się odzyskać jej treść
-      // (data.truncated === true), pokazujemy przycisk "Kontynuuj" zamiast
-      // ostrzeżenia — nie ma sensu straszyć, skoro można to po prostu dociągnąć.
-      if(data.parseFailed && !data.truncated){
-        const warn = 'Ta odpowiedź nie została poprawnie odczytana, więc baza jednostek NIE została zaktualizowana w tej turze.';
-        state.messages.push({ role: 'warning', content: warn });
-        appendMessageEl({ role: 'warning', content: warn }, true);
-      }
 
       if(Array.isArray(data.inconsistencies) && data.inconsistencies.length){
         data.inconsistencies.forEach(text => {
@@ -1024,10 +1216,16 @@
         });
       }
 
-      // Jednostki zostały już zapisane do wspólnej bazy przez backend —
-      // tu tylko odświeżamy widok u siebie, bez ponownego zapisu.
-      mergeEntities(data.entities);
-      renderEntities();
+      // Propozycje AI nie zmieniają jeszcze bazy — trafiają do kolejki.
+      // Pokaż powiadomienie w czacie i odśwież zakładkę Propozycje.
+      if(Array.isArray(data.proposals) && data.proposals.length){
+        const n = data.proposals.length;
+        const notice = 'DARK zaproponował ' + n + (n === 1 ? ' zmianę' : (n < 5 ? ' zmiany' : ' zmian')) + ' w bazie — sprawdź zakładkę „Propozycje", żeby je zatwierdzić albo odrzucić.';
+        state.messages.push({ role: 'proposal-notice', content: notice });
+        appendMessageEl({ role: 'proposal-notice', content: notice }, true);
+        await loadProposals();
+      }
+
       persist();
 
     }catch(err){
@@ -1039,69 +1237,6 @@
     } finally {
       sendBtn.disabled = false;
       inputEl.focus();
-    }
-  }
-
-  // Dociąga dalszą część wiadomości, która została ucięta na limicie
-  // tokenów (m.truncated === true). Wysyła historię aż do tej wiadomości
-  // włącznie (z nią jako ostatnią turą modelu) plus nową turę z prośbą
-  // o kontynuację, a wynik dokleja do istniejącej treści wiadomości.
-  async function continueMessage(index){
-    if(continuingIndex !== null) return;
-    const target = state.messages[index];
-    if(!target || target.role !== 'assistant') return;
-
-    continuingIndex = index;
-    renderChat();
-
-    try{
-      const historySlice = buildHistoryUpTo(index);
-      historySlice.push({
-        role: 'user',
-        parts: [{ text: 'Kontynuuj dokładnie od miejsca, w którym urwała się Twoja poprzednia wiadomość. Nie powtarzaj tego, co już napisałeś, i nie zaczynaj od nowa — po prostu pisz dalej w tym samym miejscu zdania czy myśli, aż naturalnie skończysz tę wypowiedź.' }]
-      });
-
-      const response = await fetch('/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: historySlice,
-          systemInstruction: buildSystemPrompt()
-        })
-      });
-
-      const data = await response.json();
-      if(data.error){
-        throw new Error(typeof data.error === 'string' ? data.error : (data.error.message || 'Błąd serwera.'));
-      }
-
-      if(data.parseFailed && !data.truncated){
-        // Kontynuacja się nie udała i nic sensownego nie odzyskano — nie
-        // doklejaj komunikatu błędu do treści wiadomości, tylko pokaż
-        // ostrzeżenie osobno i zostaw przycisk aktywny do ponownej próby.
-        target.truncated = true;
-        const warn = data.reply || 'Nie udało się dociągnąć dalszej części odpowiedzi — spróbuj kliknąć „Kontynuuj" ponownie.';
-        state.messages.push({ role: 'warning', content: warn });
-      } else {
-        target.content = target.content + (data.reply || '');
-        target.truncated = !!data.truncated;
-
-        if(Array.isArray(data.inconsistencies) && data.inconsistencies.length){
-          data.inconsistencies.forEach(text => {
-            state.messages.push({ role: 'inconsistency', content: text });
-          });
-        }
-        mergeEntities(data.entities);
-        renderEntities();
-      }
-
-      persist();
-    }catch(err){
-      console.error('Błąd kontynuacji:', err);
-      alert('Nie udało się dociągnąć dalszej części odpowiedzi: ' + err.message);
-    } finally {
-      continuingIndex = null;
-      renderChat();
     }
   }
 
