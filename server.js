@@ -21,7 +21,14 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
-const GEMINI_MAX_OUTPUT_TOKENS = parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS, 10) || 32768;
+// Podbite z 32768 -> 65536: na modelach Gemini 3 tokeny "myślenia" (thinking)
+// liczą się do TEGO SAMEGO budżetu co realna odpowiedź, nawet przy niskim
+// thinkingLevel. Przy JSON mode + responseSchema łatwo się w to wjeżdża
+// (MAX_TOKENS = odpowiedź ucięta w połowie). Więcej luzu na start = mniej
+// ucinanych tur. Da się to też nadpisać zmienną środowiskową bez redeployu.
+const GEMINI_MAX_OUTPUT_TOKENS = parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS, 10) || 65536;
+// Sufit, do którego wolno automatycznie podbijać budżet przy retry na MAX_TOKENS.
+const GEMINI_MAX_OUTPUT_TOKENS_CEILING = parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS_CEILING, 10) || 131072;
 
 // Supabase jest opcjonalne — jeśli zmienne nie są ustawione albo są niepoprawne,
 // endpointy związane z bazą zwrócą czytelny błąd zamiast wywalać cały serwer
@@ -195,11 +202,13 @@ function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 async function callGeminiWithRetry(url, body, maxRetries = 3) {
   let lastResponse, lastData;
+  let currentBody = body;
+
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const geminiResponse = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify(currentBody),
     });
     const data = await geminiResponse.json();
 
@@ -212,6 +221,29 @@ async function callGeminiWithRetry(url, body, maxRetries = 3) {
       await sleep(waitMs);
       continue;
     }
+
+    // Odpowiedź ucięta, bo thinking + treść nie zmieściły się w budżecie
+    // tokenów (MAX_TOKENS). Zamiast tracić całą turę, podbij budżet i
+    // spróbuj jeszcze raz — aż do rozsądnego sufitu.
+    const candidate = geminiResponse.ok && data.candidates && data.candidates[0];
+    const finishReason = candidate && candidate.finishReason;
+    if (finishReason === 'MAX_TOKENS' && attempt < maxRetries) {
+      lastResponse = geminiResponse;
+      lastData = data;
+      const oldBudget = currentBody.generationConfig.maxOutputTokens;
+      const newBudget = Math.min(oldBudget * 2, GEMINI_MAX_OUTPUT_TOKENS_CEILING);
+      if (newBudget === oldBudget) {
+        // Już na suficie — nie ma sensu próbować dalej z tym samym budżetem.
+        return { geminiResponse, data };
+      }
+      console.warn(`Gemini uciął odpowiedź na MAX_TOKENS (budżet ${oldBudget}), próba ${attempt + 1}/${maxRetries + 1} — podbijam do ${newBudget}.`);
+      currentBody = {
+        ...currentBody,
+        generationConfig: { ...currentBody.generationConfig, maxOutputTokens: newBudget },
+      };
+      continue;
+    }
+
     return { geminiResponse, data };
   }
   return { geminiResponse: lastResponse, data: lastData };
@@ -240,11 +272,12 @@ app.post('/api/chat', asyncRoute(async (req, res) => {
         maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
         responseMimeType: 'application/json',
         responseSchema: RESPONSE_SCHEMA,
-        // Gemini 3 domyślnie zużywa dużą część limitu tokenów na wewnętrzne
-        // "myślenie" (liczone jako tokeny wyjściowe!). To zadanie to głównie
-        // ekstrakcja danych + zwięzła odpowiedź — nie potrzebuje głębokiego
-        // rozumowania, więc ograniczamy je, żeby zostawić miejsce na treść.
-        thinkingConfig: { thinkingLevel: 'low' },
+        // 'minimal' zamiast 'low': Gemini 3 zużywa tokeny myślenia z TEGO
+        // SAMEGO budżetu co odpowiedź, nawet przy niskich poziomach. To
+        // zadanie to głównie ekstrakcja danych + zwięzła odpowiedź — nie
+        // potrzebuje głębokiego rozumowania, więc ograniczamy je maksymalnie,
+        // żeby zostawić jak najwięcej miejsca na treść.
+        thinkingConfig: { thinkingLevel: 'minimal' },
       },
     });
 
@@ -280,12 +313,24 @@ app.post('/api/chat', asyncRoute(async (req, res) => {
     } catch (e) {
       parseFailed = true;
       console.error('Nie udało się sparsować JSON od Gemini. finishReason:', finishReason, '| surowy tekst:', raw.slice(0, 500));
+
+      // Nawet jeśli JSON jako całość jest niepoprawny (ucięty w połowie),
+      // spróbuj odzyskać z niego kompletne obiekty jednostek z tablicy
+      // "entities" — żeby retry na MAX_TOKENS + ten fallback razem dawały
+      // jak najmniejszą szansę na utratę całej tury.
+      const salvaged = salvageEntitiesFromTruncatedJson(clean);
+
       let hint = 'Nie udało się odczytać odpowiedzi.';
       if (finishReason === 'SAFETY') hint = 'Odpowiedź została zablokowana przez filtry bezpieczeństwa Gemini (finishReason: SAFETY).';
-      else if (finishReason === 'MAX_TOKENS') hint = 'Odpowiedź została ucięta, bo przekroczyła limit tokenów (finishReason: MAX_TOKENS) — spróbuj krótszej wiadomości.';
+      else if (finishReason === 'MAX_TOKENS') {
+        hint = salvaged.length
+          ? `Odpowiedź została ucięta mimo automatycznych ponowień (finishReason: MAX_TOKENS). Udało się jednak odzyskać ${salvaged.length} jednostek z uciętej odpowiedzi — zostały zapisane. Spróbuj krótszej wiadomości albo poproś o mniej jednostek naraz.`
+          : 'Odpowiedź została ucięta, bo przekroczyła limit tokenów (finishReason: MAX_TOKENS) — spróbuj krótszej wiadomości.';
+      }
       else if (finishReason === 'RECITATION') hint = 'Gemini odmówił odpowiedzi z powodu podejrzenia o cytowanie chronionej treści (finishReason: RECITATION).';
       else if (!raw) hint = `Model nie zwrócił żadnej treści (finishReason: ${finishReason || 'nieznany'}).`;
-      parsed = { reply: hint, entities: [], inconsistencies: [] };
+
+      parsed = { reply: hint, entities: salvaged, inconsistencies: [] };
     }
 
     const entities = Array.isArray(parsed.entities) ? parsed.entities : [];
@@ -321,6 +366,60 @@ app.post('/api/chat', asyncRoute(async (req, res) => {
     res.status(502).json({ error: 'Nie udało się połączyć z Gemini: ' + err.message });
   }
 }));
+
+// Próbuje wyciągnąć kompletne obiekty jednostek z tablicy "entities" wewnątrz
+// uciętego (niepoprawnego) JSON-a. Działa na zasadzie zliczania nawiasów
+// klamrowych, żeby złapać tylko te obiekty {...}, które model zdążył w pełni
+// domknąć przed przekroczeniem limitu tokenów.
+function salvageEntitiesFromTruncatedJson(text) {
+  const marker = '"entities"';
+  const idx = text.indexOf(marker);
+  if (idx === -1) return [];
+
+  const arrayStart = text.indexOf('[', idx);
+  if (arrayStart === -1) return [];
+
+  const results = [];
+  let i = arrayStart + 1;
+  while (i < text.length) {
+    while (i < text.length && /[\s,]/.test(text[i])) i++;
+    if (text[i] !== '{') break;
+
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let objStart = i;
+    let objEnd = -1;
+
+    for (let j = i; j < text.length; j++) {
+      const ch = text[j];
+      if (inString) {
+        if (escape) escape = false;
+        else if (ch === '\\') escape = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') { inString = true; continue; }
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) { objEnd = j; break; }
+      }
+    }
+
+    if (objEnd === -1) break; // obiekt ucięty w połowie — koniec odzyskiwania
+
+    const objText = text.slice(objStart, objEnd + 1);
+    try {
+      const obj = JSON.parse(objText);
+      if (obj && obj.name && String(obj.name).trim()) results.push(obj);
+    } catch { /* pomiń niepoprawny fragment */ }
+
+    i = objEnd + 1;
+  }
+
+  return results;
+}
 
 // Prosty health-check — przydatny dla Render, żeby wiedział, że usługa żyje
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
