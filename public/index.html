@@ -243,6 +243,16 @@
   /* ---------- Wejście nowych wiadomości ---------- */
   @keyframes msgIn{ from{ opacity:0; transform:translateY(4px);} to{ opacity:1; transform:translateY(0);} }
   .msg, .inconsistency{ animation:msgIn .2s ease; }
+
+  /* ---------- Przycisk "Kontynuuj" dla uciętych odpowiedzi ---------- */
+  .continue-btn{
+    display:inline-flex; align-items:center; gap:6px; margin-top:10px; margin-left:16px;
+    background:transparent; border:1px dashed var(--accent-dim); color:var(--accent);
+    font-family:var(--font-mono); font-size:11.5px; padding:6px 11px; border-radius:4px;
+    cursor:pointer; transition:background .15s, border-color .15s;
+  }
+  .continue-btn:hover:not(:disabled){ background:var(--accent-soft); border-color:var(--accent); }
+  .continue-btn:disabled{ opacity:.5; cursor:default; }
 </style>
 </head>
 <body>
@@ -333,6 +343,7 @@
   let newDocParent; // undefined = brak formularza; null = nowy element główny; id = poddokument
   let collapsedDocs = {};
   let expandedDocs = {};
+  let continuingIndex = null; // indeks wiadomości, dla której trwa właśnie dociąganie kontynuacji
 
   const chatEl = document.getElementById('chat');
   const emptyState = document.getElementById('emptyState');
@@ -473,11 +484,14 @@
   function renderChat(){
     chatEl.querySelectorAll('.msg, .inconsistency').forEach(n => n.remove());
     if(state.messages.length === 0){ emptyState.style.display = 'block'; }
-    else{ emptyState.style.display = 'none'; state.messages.forEach(m => appendMessageEl(m, false)); }
+    else{
+      emptyState.style.display = 'none';
+      state.messages.forEach((m, i) => appendMessageEl(m, false, i));
+    }
     chatEl.scrollTop = chatEl.scrollHeight;
   }
 
-  function appendMessageEl(m, scroll){
+  function appendMessageEl(m, scroll, index){
     if(m.role === 'inconsistency' || m.role === 'warning'){
       const div = document.createElement('div');
       div.className = 'inconsistency';
@@ -495,6 +509,19 @@
       bubble.textContent = m.content;
       div.appendChild(label);
       div.appendChild(bubble);
+
+      // Odpowiedź ucięta na limicie tokenów — pozwól dociągnąć resztę.
+      if(m.role === 'assistant' && m.truncated && typeof index === 'number'){
+        const isContinuing = continuingIndex === index;
+        const contBtn = document.createElement('button');
+        contBtn.className = 'continue-btn';
+        contBtn.type = 'button';
+        contBtn.textContent = isContinuing ? 'Dociągam dalszą część…' : '⤵ Kontynuuj';
+        contBtn.disabled = continuingIndex !== null;
+        contBtn.addEventListener('click', () => continueMessage(index));
+        div.appendChild(contBtn);
+      }
+
       chatEl.appendChild(div);
     }
     if(scroll) chatEl.scrollTop = chatEl.scrollHeight;
@@ -928,6 +955,17 @@
     ].join('\n');
   }
 
+  // Buduje tablicę "contents" (historia rozmowy w formacie Gemini) na
+  // podstawie state.messages, biorąc pod uwagę tylko wiadomości user/assistant
+  // do (włącznie z) danego indeksu — ostatnie 16 z nich.
+  function buildHistoryUpTo(uptoIndex){
+    return state.messages
+      .slice(0, uptoIndex + 1)
+      .filter(m => m.role === 'user' || m.role === 'assistant')
+      .slice(-16)
+      .map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
+  }
+
   async function sendMessage(){
     const text = inputEl.value.trim();
     if(!text || sendBtn.disabled) return;
@@ -947,10 +985,7 @@
     chatEl.scrollTop = chatEl.scrollHeight;
 
     try{
-      const recentHistory = state.messages
-        .filter(m => m.role === 'user' || m.role === 'assistant')
-        .slice(-16)
-        .map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
+      const recentHistory = buildHistoryUpTo(state.messages.length - 1);
 
       const response = await fetch('/api/chat', {
         method: 'POST',
@@ -969,10 +1004,14 @@
       typingEl.remove();
 
       const replyText = data.reply || '(brak treści odpowiedzi)';
-      state.messages.push({ role: 'assistant', content: replyText });
-      appendMessageEl({ role: 'assistant', content: replyText }, true);
+      const assistantMsg = { role: 'assistant', content: replyText, truncated: !!data.truncated };
+      state.messages.push(assistantMsg);
+      appendMessageEl(assistantMsg, true, state.messages.length - 1);
 
-      if(data.parseFailed){
+      // Jeśli odpowiedź jest ucięta, ale udało się odzyskać jej treść
+      // (data.truncated === true), pokazujemy przycisk "Kontynuuj" zamiast
+      // ostrzeżenia — nie ma sensu straszyć, skoro można to po prostu dociągnąć.
+      if(data.parseFailed && !data.truncated){
         const warn = 'Ta odpowiedź nie została poprawnie odczytana, więc baza jednostek NIE została zaktualizowana w tej turze.';
         state.messages.push({ role: 'warning', content: warn });
         appendMessageEl({ role: 'warning', content: warn }, true);
@@ -1000,6 +1039,69 @@
     } finally {
       sendBtn.disabled = false;
       inputEl.focus();
+    }
+  }
+
+  // Dociąga dalszą część wiadomości, która została ucięta na limicie
+  // tokenów (m.truncated === true). Wysyła historię aż do tej wiadomości
+  // włącznie (z nią jako ostatnią turą modelu) plus nową turę z prośbą
+  // o kontynuację, a wynik dokleja do istniejącej treści wiadomości.
+  async function continueMessage(index){
+    if(continuingIndex !== null) return;
+    const target = state.messages[index];
+    if(!target || target.role !== 'assistant') return;
+
+    continuingIndex = index;
+    renderChat();
+
+    try{
+      const historySlice = buildHistoryUpTo(index);
+      historySlice.push({
+        role: 'user',
+        parts: [{ text: 'Kontynuuj dokładnie od miejsca, w którym urwała się Twoja poprzednia wiadomość. Nie powtarzaj tego, co już napisałeś, i nie zaczynaj od nowa — po prostu pisz dalej w tym samym miejscu zdania czy myśli, aż naturalnie skończysz tę wypowiedź.' }]
+      });
+
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: historySlice,
+          systemInstruction: buildSystemPrompt()
+        })
+      });
+
+      const data = await response.json();
+      if(data.error){
+        throw new Error(typeof data.error === 'string' ? data.error : (data.error.message || 'Błąd serwera.'));
+      }
+
+      if(data.parseFailed && !data.truncated){
+        // Kontynuacja się nie udała i nic sensownego nie odzyskano — nie
+        // doklejaj komunikatu błędu do treści wiadomości, tylko pokaż
+        // ostrzeżenie osobno i zostaw przycisk aktywny do ponownej próby.
+        target.truncated = true;
+        const warn = data.reply || 'Nie udało się dociągnąć dalszej części odpowiedzi — spróbuj kliknąć „Kontynuuj" ponownie.';
+        state.messages.push({ role: 'warning', content: warn });
+      } else {
+        target.content = target.content + (data.reply || '');
+        target.truncated = !!data.truncated;
+
+        if(Array.isArray(data.inconsistencies) && data.inconsistencies.length){
+          data.inconsistencies.forEach(text => {
+            state.messages.push({ role: 'inconsistency', content: text });
+          });
+        }
+        mergeEntities(data.entities);
+        renderEntities();
+      }
+
+      persist();
+    }catch(err){
+      console.error('Błąd kontynuacji:', err);
+      alert('Nie udało się dociągnąć dalszej części odpowiedzi: ' + err.message);
+    } finally {
+      continuingIndex = null;
+      renderChat();
     }
   }
 
