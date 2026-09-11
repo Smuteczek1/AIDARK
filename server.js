@@ -21,7 +21,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
-const GEMINI_MAX_OUTPUT_TOKENS = parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS, 10) || 16384;
+const GEMINI_MAX_OUTPUT_TOKENS = parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS, 10) || 32768;
 
 // Supabase jest opcjonalne — jeśli zmienne nie są ustawione albo są niepoprawne,
 // endpointy związane z bazą zwrócą czytelny błąd zamiast wywalać cały serwer
@@ -191,6 +191,32 @@ const SAFETY_SETTINGS = [
   { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
 ];
 
+function sleep(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+async function callGeminiWithRetry(url, body, maxRetries = 3) {
+  let lastResponse, lastData;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const geminiResponse = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await geminiResponse.json();
+
+    // 503 (przeciążenie) i 429 (limit zapytań) bywają chwilowe — warto spróbować ponownie.
+    if ((geminiResponse.status === 503 || geminiResponse.status === 429) && attempt < maxRetries) {
+      lastResponse = geminiResponse;
+      lastData = data;
+      const waitMs = 1000 * Math.pow(2, attempt); // 1s, 2s, 4s...
+      console.warn(`Gemini zwrócił ${geminiResponse.status}, próba ${attempt + 1}/${maxRetries + 1} — ponawiam za ${waitMs}ms.`);
+      await sleep(waitMs);
+      continue;
+    }
+    return { geminiResponse, data };
+  }
+  return { geminiResponse: lastResponse, data: lastData };
+}
+
 // ---------- Czat z Gemini ----------
 
 app.post('/api/chat', asyncRoute(async (req, res) => {
@@ -206,30 +232,27 @@ app.post('/api/chat', asyncRoute(async (req, res) => {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
   try {
-    const geminiResponse = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents,
-        systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined,
-        safetySettings: SAFETY_SETTINGS,
-        generationConfig: {
-          maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
-          responseMimeType: 'application/json',
-          responseSchema: RESPONSE_SCHEMA,
-          // Gemini 3 domyślnie zużywa dużą część limitu tokenów na wewnętrzne
-          // "myślenie" (liczone jako tokeny wyjściowe!). To zadanie to głównie
-          // ekstrakcja danych + zwięzła odpowiedź — nie potrzebuje głębokiego
-          // rozumowania, więc ograniczamy je, żeby zostawić miejsce na treść.
-          thinkingConfig: { thinkingLevel: 'low' },
-        },
-      }),
+    const { geminiResponse, data } = await callGeminiWithRetry(url, {
+      contents,
+      systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined,
+      safetySettings: SAFETY_SETTINGS,
+      generationConfig: {
+        maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+        responseMimeType: 'application/json',
+        responseSchema: RESPONSE_SCHEMA,
+        // Gemini 3 domyślnie zużywa dużą część limitu tokenów na wewnętrzne
+        // "myślenie" (liczone jako tokeny wyjściowe!). To zadanie to głównie
+        // ekstrakcja danych + zwięzła odpowiedź — nie potrzebuje głębokiego
+        // rozumowania, więc ograniczamy je, żeby zostawić miejsce na treść.
+        thinkingConfig: { thinkingLevel: 'low' },
+      },
     });
-
-    const data = await geminiResponse.json();
 
     if (!geminiResponse.ok) {
       const msg = (data && data.error && data.error.message) || 'Błąd Gemini.';
+      if (geminiResponse.status === 503) {
+        return res.status(503).json({ error: 'Gemini jest chwilowo przeciążone (nawet po kilku automatycznych próbach). Spróbuj wysłać wiadomość ponownie za chwilę.' });
+      }
       return res.status(geminiResponse.status).json({ error: msg });
     }
 
