@@ -34,20 +34,45 @@ Aplikacja wystartuje na `http://localhost:3000`.
 dlatego istnieje WYŁĄCZNIE po stronie serwera (zmienna środowiskowa), nigdy
 w kodzie frontendu.
 
+### Aktualizacja istniejącego projektu (masz już `entities`/`documents`)
+
+`supabase-schema.sql` używa `create table if not exists`, więc bezpiecznie
+uruchomisz cały plik ponownie — istniejące tabele `entities` i `documents`
+zostaną nietknięte, dopisze się tylko nowa tabela `proposals` (kolejka
+propozycji AI czekających na zatwierdzenie). Nic nie trzeba czyścić ręcznie.
+
 ## Jak to działa
 
-- **Baza jednostek** — wspólna dla wszystkich, kto wejdzie na stronę. Gemini
-  dopisuje/aktualizuje jednostki automatycznie po każdej turze czatu (backend
-  zapisuje je od razu do Supabase), a Ty możesz też dodawać/edytować/usuwać
-  ręcznie przyciskiem "+ Nowa" w zakładce Jednostki.
+- **Agent z narzędziami** — Gemini nie zwraca już jednego sztywnego bloku
+  JSON. Dostaje zestaw osobnych narzędzi (function calling):
+  `propose_create_entity`, `propose_update_entity`, `propose_delete_entity`,
+  `propose_create_document`, `propose_update_document`,
+  `propose_delete_document`, `propose_move_document`, `search_documents`
+  i `flag_inconsistency`. W jednej turze może wywołać ich dowolną liczbę,
+  w dowolnej kolejności (np. najpierw sprawdzić `search_documents`, żeby
+  uniknąć duplikatu, potem złożyć kilka propozycji, na końcu odpowiedzieć
+  tekstem) — backend (`/api/chat`) obsługuje to jako pętlę: wysyła
+  wiadomość do Gemini, wykonuje zgłoszone wywołania, odsyła wyniki, i tak
+  aż model skończy i zwróci czysty tekst.
+- **Propozycje zamiast bezpośrednich zmian** — każde wywołanie `propose_*`
+  NIE zmienia bazy od razu. Zapisuje wiersz w tabeli `proposals` (status
+  `pending`) razem z uzasadnieniem AI. Zmiana trafia do bazy dopiero, gdy
+  człowiek ją zatwierdzi w zakładce **Propozycje** w bocznym panelu —
+  pojedynczo albo całą partią naraz (np. całe drzewo dokumentów założone
+  w jednej turze). Odrzucona propozycja znika bez śladu w bazie.
+  `flag_inconsistency` to wyjątek — to tylko ostrzeżenie tekstowe, nie
+  zmienia niczego, więc nie wymaga zatwierdzania.
+- **Baza jednostek** — wspólna dla wszystkich, kto wejdzie na stronę.
+  Zmienia się tylko przez zatwierdzone propozycje AI albo ręcznie,
+  przyciskiem "+ Nowa" / edycją karty w zakładce Jednostki.
 - **Dokumenty** — druga zakładka w bocznym panelu. Każdy dokument może mieć
-  poddokumenty (przycisk "+ pod" przy dowolnym elemencie) — jeśli ma dzieci,
-  w praktyce działa jak folder, jeśli nie, jest zwykłym dokumentem z treścią.
-  Można zagnieżdżać dowolnie głęboko. Na razie dokumenty tworzą/edytują tylko
-  ludzie — AI ich nie dotyka (można to dodać później, jeśli chcecie).
+  poddokumenty — jeśli ma dzieci, w praktyce działa jak folder, jeśli nie,
+  jest zwykłym dokumentem z treścią. Można zagnieżdżać dowolnie głęboko,
+  ręcznie albo przez zatwierdzone propozycje AI (które budują całe drzewo
+  naraz, odwołując się do tymczasowych `temp_id` w obrębie jednej tury).
 - **Historia czatu** — zostaje lokalnie w przeglądarce (`localStorage`), więc
   przycisk "Resetuj" czyści tylko Twój lokalny podgląd rozmowy, nie rusza
-  wspólnej bazy jednostek ani dokumentów.
+  wspólnej bazy jednostek, dokumentów ani kolejki propozycji.
 
 ## Wdrożenie na Render
 

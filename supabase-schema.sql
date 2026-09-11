@@ -30,3 +30,24 @@ create table if not exists documents (
 );
 
 create index if not exists documents_parent_id_idx on documents (parent_id);
+
+-- Propozycje: AI nigdy nie zmienia entities/documents bezpośrednio. Każda
+-- akcja (create/update/delete jednostki, create/update/delete/move
+-- dokumentu) trafia najpierw tutaj jako "pending" i czeka na ręczne
+-- zatwierdzenie/odrzucenie przez użytkownika w panelu "Propozycje".
+-- batch_id grupuje wszystkie propozycje wygenerowane w jednej turze czatu
+-- (np. cały drzewo dokumentów naraz), żeby dało się je zatwierdzić razem.
+create table if not exists proposals (
+  id uuid primary key default gen_random_uuid(),
+  batch_id uuid not null,
+  action text not null,   -- create_entity | update_entity | delete_entity |
+                          -- create_document | update_document | delete_document | move_document
+  payload jsonb not null,
+  reasoning text,
+  status text not null default 'pending',  -- pending | approved | rejected
+  created_at timestamptz not null default now(),
+  resolved_at timestamptz
+);
+
+create index if not exists proposals_status_idx on proposals (status);
+create index if not exists proposals_batch_idx on proposals (batch_id);

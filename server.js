@@ -2,10 +2,16 @@
 //
 // Robi trzy rzeczy:
 // 1. Serwuje statyczny frontend (folder /public).
-// 2. /api/chat — dokłada sekretny klucz Gemini, woła Gemini, parsuje odpowiedź
-//    i od razu zapisuje nowe/zaktualizowane jednostki do wspólnej bazy (Supabase).
-// 3. /api/entities i /api/documents — REST-owy dostęp do wspólnej bazy, żeby
-//    ludzie (nie tylko AI) też mogli dodawać/edytować/usuwać wpisy.
+// 2. /api/chat — agentowa pętla z Gemini function calling: model dostaje
+//    zestaw narzędzi (propose_create_entity, propose_create_document, itd.),
+//    może je wywoływać wielokrotnie w dowolnej kolejności zanim odpowie
+//    tekstem. Każde wywołanie propose_* NIE zmienia bazy od razu — zapisuje
+//    wiersz w tabeli "proposals" (status pending) i czeka na ręczne
+//    zatwierdzenie przez użytkownika. flag_inconsistency i search_documents
+//    wykonują się od razu (odpowiednio: nie dotykają bazy / tylko czytają).
+// 3. /api/entities, /api/documents, /api/proposals — REST-owy dostęp do
+//    wspólnej bazy: ludzie mogą edytować jednostki/dokumenty ręcznie,
+//    zatwierdzać lub odrzucać propozycje AI (pojedynczo albo całą partią).
 //
 // Oba sekrety (GEMINI_API_KEY oraz klucz Supabase) żyją WYŁĄCZNIE jako zmienne
 // środowiskowe na serwerze — nigdy nie trafiają do przeglądarki.
@@ -13,6 +19,7 @@
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { randomUUID } from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -21,18 +28,23 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.6-flash';
-// Podbite z 32768 -> 65536: na modelach Gemini 3 tokeny "myślenia" (thinking)
-// liczą się do TEGO SAMEGO budżetu co realna odpowiedź, nawet przy niskim
-// thinkingLevel. Przy JSON mode + responseSchema łatwo się w to wjeżdża
-// (MAX_TOKENS = odpowiedź ucięta w połowie). Więcej luzu na start = mniej
-// ucinanych tur. Da się to też nadpisać zmienną środowiskową bez redeployu.
+// Tokeny "myślenia" (thinking) liczą się do TEGO SAMEGO budżetu co realna
+// odpowiedź, nawet przy niskim thinkingLevel — więc dajemy spory luz na start,
+// żeby pętla wywołań narzędzi nie ucinała się w połowie.
 const GEMINI_MAX_OUTPUT_TOKENS = parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS, 10) || 65536;
 // Sufit, do którego wolno automatycznie podbijać budżet przy retry na MAX_TOKENS.
 const GEMINI_MAX_OUTPUT_TOKENS_CEILING = parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS_CEILING, 10) || 131072;
+// Ile razy model może wywołać narzędzia w jednej turze użytkownika, zanim
+// wymusimy zakończenie (zabezpieczenie przed nieskończoną pętlą).
+const MAX_TOOL_ITERATIONS = parseInt(process.env.MAX_TOOL_ITERATIONS, 10) || 8;
+
+const CATEGORIES = ['Korporacja', 'Jednostka / Wydział', 'Frakcja', 'Postać', 'Anomalia', 'Miejsce', 'Wydarzenie', 'Inne'];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Supabase jest opcjonalne — jeśli zmienne nie są ustawione albo są niepoprawne,
 // endpointy związane z bazą zwrócą czytelny błąd zamiast wywalać cały serwer
-// (a czat z Gemini, który Supabase w ogóle nie potrzebuje, ma dalej działać).
+// (a czat z Gemini, który do samego generowania tekstu Supabase nie potrzebuje,
+// ma dalej działać — choć narzędzia propose_* bez bazy nie zapiszą propozycji).
 let supabase = null;
 {
   const url = (process.env.SUPABASE_URL || '').trim();
@@ -69,7 +81,7 @@ function asyncRoute(fn) {
   };
 }
 
-// ---------- Jednostki ----------
+// ---------- Jednostki (edycja ręczna — AI zmienia je wyłącznie przez propozycje) ----------
 
 app.get('/api/entities', asyncRoute(async (req, res) => {
   if (!requireSupabase(res)) return;
@@ -162,30 +174,398 @@ app.delete('/api/documents/:id', asyncRoute(async (req, res) => {
   res.json({ ok: true });
 }));
 
-const RESPONSE_SCHEMA = {
-  type: 'object',
-  properties: {
-    reply: { type: 'string' },
-    entities: {
-      type: 'array',
-      items: {
+// ---------- Propozycje AI (zatwierdzanie / odrzucanie przez człowieka) ----------
+
+app.get('/api/proposals', asyncRoute(async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const status = req.query.status || 'pending';
+  let q = supabase.from('proposals').select('*').order('created_at');
+  if (status !== 'all') q = q.eq('status', status);
+  const { data, error } = await q;
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+}));
+
+app.post('/api/proposals/:id/approve', asyncRoute(async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const result = await approveProposal(req.params.id);
+  if (result.error) return res.status(400).json({ error: result.error });
+  res.json(result);
+}));
+
+app.post('/api/proposals/:id/reject', asyncRoute(async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const { error } = await supabase
+    .from('proposals')
+    .update({ status: 'rejected', resolved_at: new Date().toISOString() })
+    .eq('id', req.params.id)
+    .eq('status', 'pending');
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true });
+}));
+
+// Zatwierdza całą partię (batch) naraz — w kilku przebiegach, żeby np.
+// dokumenty-dzieci mogły poczekać, aż ich dokument nadrzędny (z tej samej
+// partii) zostanie już utworzony i dostanie realne ID.
+app.post('/api/proposals/batch/:batchId/approve', asyncRoute(async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const { data: rows, error } = await supabase
+    .from('proposals')
+    .select('*')
+    .eq('batch_id', req.params.batchId)
+    .eq('status', 'pending');
+  if (error) return res.status(500).json({ error: error.message });
+
+  const results = [];
+  let remaining = rows || [];
+  let progressed = true;
+  while (remaining.length && progressed) {
+    progressed = false;
+    const stillPending = [];
+    for (const row of remaining) {
+      const r = await approveProposal(row.id, row);
+      if (r.error) {
+        stillPending.push(row);
+      } else {
+        results.push({ id: row.id, ok: true });
+        progressed = true;
+      }
+    }
+    remaining = stillPending;
+  }
+  remaining.forEach((row) => results.push({ id: row.id, ok: false, error: 'Nie udało się rozwiązać zależności (np. brakujący dokument nadrzędny).' }));
+
+  res.json({ results });
+}));
+
+app.post('/api/proposals/batch/:batchId/reject', asyncRoute(async (req, res) => {
+  if (!requireSupabase(res)) return;
+  const { error } = await supabase
+    .from('proposals')
+    .update({ status: 'rejected', resolved_at: new Date().toISOString() })
+    .eq('batch_id', req.params.batchId)
+    .eq('status', 'pending');
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ ok: true });
+}));
+
+// Wykonuje faktyczną zmianę w entities/documents dla jednej zatwierdzonej
+// propozycji. `preloadedRow` pozwala pętli zatwierdzania partii uniknąć
+// dodatkowego SELECT-a na każdą propozycję.
+async function approveProposal(id, preloadedRow) {
+  let row = preloadedRow;
+  if (!row) {
+    const { data, error } = await supabase.from('proposals').select('*').eq('id', id).single();
+    if (error || !data) return { error: 'Nie znaleziono propozycji.' };
+    row = data;
+  }
+  if (row.status !== 'pending') return { error: 'Ta propozycja została już rozstrzygnięta.' };
+
+  const p = row.payload || {};
+
+  try {
+    switch (row.action) {
+      case 'create_entity': {
+        if (!p.name || !String(p.name).trim()) return { error: 'Propozycja nie ma nazwy jednostki.' };
+        const entityRow = {
+          key: String(p.name).trim().toLowerCase(),
+          name: String(p.name).trim(),
+          kategoria: p.kategoria || null,
+          tajnosc: p.tajnosc || null,
+          opis: p.opis || null,
+          status: p.status || null,
+          powiazania: p.powiazania || null,
+          nadrzedna: p.nadrzedna || null,
+          updated_at: new Date().toISOString(),
+        };
+        const { error } = await supabase.from('entities').upsert(entityRow, { onConflict: 'key' });
+        if (error) return { error: error.message };
+        break;
+      }
+
+      case 'update_entity': {
+        if (!p.key) return { error: 'Brak klucza jednostki.' };
+        const { data: existing, error: fetchErr } = await supabase.from('entities').select('*').eq('key', p.key).single();
+        if (fetchErr || !existing) return { error: 'Jednostka o tym kluczu już nie istnieje w bazie.' };
+
+        const merged = { ...existing };
+        ['name', 'kategoria', 'tajnosc', 'opis', 'status', 'powiazania', 'nadrzedna'].forEach((f) => {
+          if (p[f] !== undefined && p[f] !== null && p[f] !== '') merged[f] = p[f];
+        });
+        merged.updated_at = new Date().toISOString();
+        const newKey = p.name ? String(p.name).trim().toLowerCase() : existing.key;
+
+        if (newKey !== existing.key) {
+          merged.key = newKey;
+          const { error: insErr } = await supabase.from('entities').insert(merged);
+          if (insErr) return { error: insErr.message };
+          const { error: delErr } = await supabase.from('entities').delete().eq('key', existing.key);
+          if (delErr) return { error: delErr.message };
+        } else {
+          const { error } = await supabase.from('entities').update(merged).eq('key', existing.key);
+          if (error) return { error: error.message };
+        }
+        break;
+      }
+
+      case 'delete_entity': {
+        if (!p.key) return { error: 'Brak klucza jednostki.' };
+        const { error } = await supabase.from('entities').delete().eq('key', p.key);
+        if (error) return { error: error.message };
+        break;
+      }
+
+      case 'create_document': {
+        let parentId = null;
+        const ref = p.parent_ref;
+        if (ref) {
+          if (UUID_RE.test(ref)) {
+            parentId = ref;
+          } else {
+            return { error: `Dokument nadrzędny (tymczasowe ID "${ref}") nie został jeszcze zatwierdzony. Zatwierdź go najpierw, albo użyj "Zatwierdź całą partię".` };
+          }
+        }
+        const { data: created, error } = await supabase
+          .from('documents')
+          .insert({ title: (p.title || 'Bez tytułu').trim(), content: p.content || '', parent_id: parentId, created_by: 'ai' })
+          .select()
+          .single();
+        if (error) return { error: error.message };
+
+        // Rozwiąż propozycje-dzieci z tej samej partii, które czekały na
+        // ten temp_id jako rodzica — podmień im parent_ref na realne ID.
+        if (p.temp_id) {
+          const { data: siblings } = await supabase
+            .from('proposals')
+            .select('*')
+            .eq('batch_id', row.batch_id)
+            .eq('action', 'create_document')
+            .eq('status', 'pending');
+          if (siblings && siblings.length) {
+            for (const sib of siblings) {
+              if (sib.payload && sib.payload.parent_ref === p.temp_id) {
+                const newPayload = { ...sib.payload, parent_ref: created.id };
+                await supabase.from('proposals').update({ payload: newPayload }).eq('id', sib.id);
+              }
+            }
+          }
+        }
+        break;
+      }
+
+      case 'update_document': {
+        if (!p.id) return { error: 'Brak ID dokumentu.' };
+        const patch = { updated_at: new Date().toISOString() };
+        if (p.title !== undefined) patch.title = p.title;
+        if (p.content !== undefined) patch.content = p.content;
+        const { error } = await supabase.from('documents').update(patch).eq('id', p.id);
+        if (error) return { error: error.message };
+        break;
+      }
+
+      case 'delete_document': {
+        if (!p.id) return { error: 'Brak ID dokumentu.' };
+        const { error } = await supabase.from('documents').delete().eq('id', p.id);
+        if (error) return { error: error.message };
+        break;
+      }
+
+      case 'move_document': {
+        if (!p.id) return { error: 'Brak ID dokumentu.' };
+        const newParent = p.new_parent_id && UUID_RE.test(p.new_parent_id) ? p.new_parent_id : null;
+        const { error } = await supabase
+          .from('documents')
+          .update({ parent_id: newParent, updated_at: new Date().toISOString() })
+          .eq('id', p.id);
+        if (error) return { error: error.message };
+        break;
+      }
+
+      default:
+        return { error: 'Nieznany typ propozycji: ' + row.action };
+    }
+  } catch (err) {
+    return { error: err.message };
+  }
+
+  const { error: statusErr } = await supabase
+    .from('proposals')
+    .update({ status: 'approved', resolved_at: new Date().toISOString() })
+    .eq('id', row.id);
+  if (statusErr) return { error: statusErr.message };
+  return { ok: true };
+}
+
+// ---------- Narzędzia (function calling) udostępniane Gemini ----------
+// Każde "propose_*" tylko ZAPISUJE propozycję (status pending) — nie zmienia
+// bazy. search_documents i flag_inconsistency wykonują się od razu.
+
+const TOOLS = [{
+  functionDeclarations: [
+    {
+      name: 'propose_create_entity',
+      description: 'Zaproponuj dodanie nowej jednostki (korporacji, postaci, anomalii, frakcji, miejsca, wydarzenia...) do wspólnej bazy. To tylko propozycja — trafia do kolejki i wymaga zatwierdzenia przez użytkownika.',
+      parameters: {
         type: 'object',
         properties: {
+          name: { type: 'string', description: 'Nazwa jednostki.' },
+          kategoria: { type: 'string', enum: CATEGORIES },
+          tajnosc: { type: 'string', description: 'Poziom tajności/klasyfikacji, jeśli świat go ma. Pomiń, jeśli nie dotyczy.' },
+          opis: { type: 'string' },
+          status: { type: 'string' },
+          powiazania: { type: 'string' },
+          nadrzedna: { type: 'string', description: 'Nazwa organizacji nadrzędnej, jeśli ta jednostka jest jej częścią.' },
+          reasoning: { type: 'string', description: 'Krótkie, konkretne uzasadnienie tej propozycji dla użytkownika (1-2 zdania).' },
+        },
+        required: ['name', 'kategoria', 'opis', 'reasoning'],
+      },
+    },
+    {
+      name: 'propose_update_entity',
+      description: 'Zaproponuj aktualizację istniejącej jednostki. Podaj tylko pola, które faktycznie się zmieniają.',
+      parameters: {
+        type: 'object',
+        properties: {
+          key: { type: 'string', description: 'Klucz jednostki (nazwa małymi literami) — dokładnie taki, jaki widnieje w bazie danych jednostek.' },
           name: { type: 'string' },
-          kategoria: { type: 'string' },
+          kategoria: { type: 'string', enum: CATEGORIES },
           tajnosc: { type: 'string' },
           opis: { type: 'string' },
           status: { type: 'string' },
           powiazania: { type: 'string' },
           nadrzedna: { type: 'string' },
+          reasoning: { type: 'string' },
         },
-        required: ['name'],
+        required: ['key', 'reasoning'],
       },
     },
-    inconsistencies: { type: 'array', items: { type: 'string' } },
-  },
-  required: ['reply', 'entities', 'inconsistencies'],
-};
+    {
+      name: 'propose_delete_entity',
+      description: 'Zaproponuj usunięcie jednostki z bazy. Używaj oszczędnie — tylko gdy jednostka naprawdę przestała mieć sens (np. duplikat, błąd).',
+      parameters: {
+        type: 'object',
+        properties: { key: { type: 'string' }, reasoning: { type: 'string' } },
+        required: ['key', 'reasoning'],
+      },
+    },
+    {
+      name: 'propose_create_document',
+      description: 'Zaproponuj utworzenie nowego dokumentu (albo folderu, jeśli planujesz dodać mu poddokumenty). Żeby zbudować całe drzewo naraz, wywołaj to narzędzie kilka razy w tej samej turze: nadaj dokumentowi-rodzicowi jakiś temp_id (np. "doc1"), a w poddokumentach ustaw parent_ref na ten sam temp_id.',
+      parameters: {
+        type: 'object',
+        properties: {
+          temp_id: { type: 'string', description: 'Krótki identyfikator TEGO dokumentu, unikalny w obrębie tej tury — żeby inne wywołania w tej samej turze mogły się do niego odwołać jako do rodzica.' },
+          parent_ref: { type: 'string', description: 'ID istniejącego dokumentu w bazie ALBO temp_id innego dokumentu proponowanego w tej samej turze. Pomiń dla elementu głównego (bez rodzica).' },
+          title: { type: 'string' },
+          content: { type: 'string', description: 'Treść dokumentu. Może być pusta, jeśli to ma być folder.' },
+          reasoning: { type: 'string' },
+        },
+        required: ['temp_id', 'title', 'reasoning'],
+      },
+    },
+    {
+      name: 'propose_update_document',
+      description: 'Zaproponuj zmianę tytułu i/lub treści istniejącego dokumentu.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'ID istniejącego dokumentu.' },
+          title: { type: 'string' },
+          content: { type: 'string' },
+          reasoning: { type: 'string' },
+        },
+        required: ['id', 'reasoning'],
+      },
+    },
+    {
+      name: 'propose_delete_document',
+      description: 'Zaproponuj usunięcie dokumentu razem z jego poddokumentami. Używaj oszczędnie.',
+      parameters: {
+        type: 'object',
+        properties: { id: { type: 'string' }, reasoning: { type: 'string' } },
+        required: ['id', 'reasoning'],
+      },
+    },
+    {
+      name: 'propose_move_document',
+      description: 'Zaproponuj przeniesienie istniejącego dokumentu pod innego rodzica (reorganizacja drzewa).',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string' },
+          new_parent_id: { type: 'string', description: 'ID nowego dokumentu-rodzica. Pomiń, żeby przenieść na najwyższy poziom.' },
+          reasoning: { type: 'string' },
+        },
+        required: ['id', 'reasoning'],
+      },
+    },
+    {
+      name: 'search_documents',
+      description: 'Przeszukaj istniejące dokumenty po tytule/treści, żeby sprawdzić, czy coś już istnieje, zanim zaproponujesz nowy dokument (unikaj duplikatów). To zapytanie tylko do odczytu — wykonuje się od razu, bez zatwierdzania.',
+      parameters: {
+        type: 'object',
+        properties: { query: { type: 'string' } },
+        required: ['query'],
+      },
+    },
+    {
+      name: 'flag_inconsistency',
+      description: 'Zgłoś konkretną sprzeczność logiczną między nową treścią a tym, co już ustalono w bazie. Nie wymaga zatwierdzenia — trafia od razu do użytkownika jako ostrzeżenie.',
+      parameters: {
+        type: 'object',
+        properties: { text: { type: 'string' } },
+        required: ['text'],
+      },
+    },
+  ],
+}];
+
+// Wykonuje jedno wywołanie narzędzia zgłoszone przez model. Zwraca kind:
+// 'inconsistency' (od razu do usera), 'tool' (wynik odczytu, np. search),
+// albo 'proposal' (zapisane w kolejce, czeka na zatwierdzenie).
+async function executeFunctionCall(fc, batchId) {
+  const name = fc.name;
+  const args = fc.args || {};
+
+  if (name === 'flag_inconsistency') {
+    return { kind: 'inconsistency', text: args.text || '', response: { status: 'ok' } };
+  }
+
+  if (name === 'search_documents') {
+    if (!supabase) return { kind: 'tool', response: { error: 'Baza dokumentów niedostępna.' } };
+    const q = String(args.query || '').toLowerCase();
+    const { data, error } = await supabase.from('documents').select('id,title,content,parent_id').limit(300);
+    if (error) return { kind: 'tool', response: { error: error.message } };
+    const matches = (data || [])
+      .filter((d) => d.title.toLowerCase().includes(q) || (d.content || '').toLowerCase().includes(q))
+      .slice(0, 15)
+      .map((d) => ({ id: d.id, title: d.title, parent_id: d.parent_id, snippet: (d.content || '').slice(0, 200) }));
+    return { kind: 'tool', response: { matches } };
+  }
+
+  // Wszystko inne to propose_* — zapisz jako propozycję oczekującą.
+  const action = name.replace(/^propose_/, '');
+  const reasoning = args.reasoning || null;
+  const payload = { ...args };
+  delete payload.reasoning;
+
+  if (!supabase) {
+    return { kind: 'tool', response: { error: 'Baza danych niedostępna — nie można zapisać propozycji.' } };
+  }
+
+  const { data: row, error } = await supabase
+    .from('proposals')
+    .insert({ batch_id: batchId, action, payload, reasoning, status: 'pending' })
+    .select()
+    .single();
+
+  if (error) return { kind: 'tool', response: { error: error.message } };
+  return {
+    kind: 'proposal',
+    proposal: row,
+    response: { status: 'proposed', proposal_id: row.id, note: 'Zapisano jako propozycję oczekującą na zatwierdzenie użytkownika. To jeszcze nie jest część bazy.' },
+  };
+}
 
 // Ten projekt to świadomie mroczna, dojrzała fikcja (styl SCP) — łagodzimy
 // domyślne progi Gemini dla przemocy/treści niepokojących, żeby nie blokował
@@ -233,7 +613,6 @@ async function callGeminiWithRetry(url, body, maxRetries = 3) {
       const oldBudget = currentBody.generationConfig.maxOutputTokens;
       const newBudget = Math.min(oldBudget * 2, GEMINI_MAX_OUTPUT_TOKENS_CEILING);
       if (newBudget === oldBudget) {
-        // Już na suficie — nie ma sensu próbować dalej z tym samym budżetem.
         return { geminiResponse, data };
       }
       console.warn(`Gemini uciął odpowiedź na MAX_TOKENS (budżet ${oldBudget}), próba ${attempt + 1}/${maxRetries + 1} — podbijam do ${newBudget}.`);
@@ -249,7 +628,14 @@ async function callGeminiWithRetry(url, body, maxRetries = 3) {
   return { geminiResponse: lastResponse, data: lastData };
 }
 
-// ---------- Czat z Gemini ----------
+function describeFinishReason(finishReason) {
+  if (finishReason === 'SAFETY') return 'Odpowiedź została zablokowana przez filtry bezpieczeństwa Gemini (finishReason: SAFETY).';
+  if (finishReason === 'MAX_TOKENS') return 'Odpowiedź została ucięta, bo przekroczyła limit tokenów mimo automatycznych ponowień (finishReason: MAX_TOKENS) — spróbuj krótszej wiadomości.';
+  if (finishReason === 'RECITATION') return 'Gemini odmówił odpowiedzi z powodu podejrzenia o cytowanie chronionej treści (finishReason: RECITATION).';
+  return `Model nie zwrócił żadnej treści (finishReason: ${finishReason || 'nieznany'}).`;
+}
+
+// ---------- Czat z Gemini: agentowa pętla wywołań narzędzi ----------
 
 app.post('/api/chat', asyncRoute(async (req, res) => {
   if (!process.env.GEMINI_API_KEY) {
@@ -262,213 +648,87 @@ app.post('/api/chat', asyncRoute(async (req, res) => {
   }
 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`;
+  const batchId = randomUUID();
+  let workingContents = [...contents];
+  let finalText = '';
+  const proposals = [];
+  const inconsistencies = [];
 
   try {
-    const { geminiResponse, data } = await callGeminiWithRetry(url, {
-      contents,
-      systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined,
-      safetySettings: SAFETY_SETTINGS,
-      generationConfig: {
-        maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
-        responseMimeType: 'application/json',
-        responseSchema: RESPONSE_SCHEMA,
-        // 'minimal' zamiast 'low': Gemini 3 zużywa tokeny myślenia z TEGO
-        // SAMEGO budżetu co odpowiedź, nawet przy niskich poziomach. To
-        // zadanie to głównie ekstrakcja danych + zwięzła odpowiedź — nie
-        // potrzebuje głębokiego rozumowania, więc ograniczamy je maksymalnie,
-        // żeby zostawić jak najwięcej miejsca na treść.
-        thinkingConfig: { thinkingLevel: 'minimal' },
-      },
-    });
-
-    if (!geminiResponse.ok) {
-      const msg = (data && data.error && data.error.message) || 'Błąd Gemini.';
-      if (geminiResponse.status === 503) {
-        return res.status(503).json({ error: 'Gemini jest chwilowo przeciążone (nawet po kilku automatycznych próbach). Spróbuj wysłać wiadomość ponownie za chwilę.' });
-      }
-      return res.status(geminiResponse.status).json({ error: msg });
-    }
-
-    // Zapytanie zablokowane w całości, zanim model zaczął odpowiadać.
-    if (data.promptFeedback && data.promptFeedback.blockReason) {
-      console.error('Gemini zablokował zapytanie:', JSON.stringify(data.promptFeedback));
-      return res.json({
-        reply: `Gemini zablokował tę wiadomość swoimi filtrami bezpieczeństwa (powód: ${data.promptFeedback.blockReason}). Spróbuj przeformułować wiadomość.`,
-        entities: [],
-        inconsistencies: [],
-        parseFailed: true,
+    for (let iter = 0; iter < MAX_TOOL_ITERATIONS; iter++) {
+      const { geminiResponse, data } = await callGeminiWithRetry(url, {
+        contents: workingContents,
+        systemInstruction: systemInstruction ? { parts: [{ text: systemInstruction }] } : undefined,
+        safetySettings: SAFETY_SETTINGS,
+        tools: TOOLS,
+        generationConfig: {
+          maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS,
+          // 'low' zamiast 'minimal': to zadanie wymaga trochę rozumowania,
+          // żeby dobrze dobrać narzędzia i kolejność ich wywołań.
+          thinkingConfig: { thinkingLevel: 'low' },
+        },
       });
-    }
 
-    const candidate = data.candidates && data.candidates[0];
-    const parts = candidate && candidate.content && candidate.content.parts;
-    const raw = Array.isArray(parts) ? parts.map((p) => p.text || '').join('') : '';
-    const clean = raw.replace(/```json|```/g, '').trim();
-    const finishReason = candidate && candidate.finishReason;
-
-    let parsed;
-    let parseFailed = false;
-    let truncated = false;
-    try {
-      parsed = JSON.parse(clean);
-    } catch (e) {
-      parseFailed = true;
-      console.error('Nie udało się sparsować JSON od Gemini. finishReason:', finishReason, '| surowy tekst:', raw.slice(0, 500));
-
-      // Nawet jeśli JSON jako całość jest niepoprawny (ucięty w połowie),
-      // spróbuj odzyskać z niego kompletne obiekty jednostek z tablicy
-      // "entities" — żeby retry na MAX_TOKENS + ten fallback razem dawały
-      // jak najmniejszą szansę na utratę całej tury.
-      const salvaged = salvageEntitiesFromTruncatedJson(clean);
-      const partialReply = extractPartialStringField(clean, 'reply');
-
-      if (finishReason === 'MAX_TOKENS' && partialReply && partialReply.text.trim()) {
-        // Mamy kawałek realnej treści od modelu (choć niedokończony) —
-        // pokaż go użytkownikowi zamiast suchego błędu i pozwól kontynuować.
-        truncated = true;
-        parsed = { reply: partialReply.text.trim(), entities: salvaged, inconsistencies: [] };
-      } else {
-        let hint = 'Nie udało się odczytać odpowiedzi.';
-        if (finishReason === 'SAFETY') hint = 'Odpowiedź została zablokowana przez filtry bezpieczeństwa Gemini (finishReason: SAFETY).';
-        else if (finishReason === 'MAX_TOKENS') {
-          hint = salvaged.length
-            ? `Odpowiedź została ucięta mimo automatycznych ponowień (finishReason: MAX_TOKENS). Udało się jednak odzyskać ${salvaged.length} jednostek z uciętej odpowiedzi — zostały zapisane. Spróbuj krótszej wiadomości albo poproś o mniej jednostek naraz.`
-            : 'Odpowiedź została ucięta, bo przekroczyła limit tokenów (finishReason: MAX_TOKENS) — spróbuj krótszej wiadomości.';
+      if (!geminiResponse.ok) {
+        const msg = (data && data.error && data.error.message) || 'Błąd Gemini.';
+        if (geminiResponse.status === 503) {
+          return res.status(503).json({ error: 'Gemini jest chwilowo przeciążone (nawet po kilku automatycznych próbach). Spróbuj wysłać wiadomość ponownie za chwilę.' });
         }
-        else if (finishReason === 'RECITATION') hint = 'Gemini odmówił odpowiedzi z powodu podejrzenia o cytowanie chronionej treści (finishReason: RECITATION).';
-        else if (!raw) hint = `Model nie zwrócił żadnej treści (finishReason: ${finishReason || 'nieznany'}).`;
-
-        parsed = { reply: hint, entities: salvaged, inconsistencies: [] };
+        return res.status(geminiResponse.status).json({ error: msg });
       }
-    }
 
-    const entities = Array.isArray(parsed.entities) ? parsed.entities : [];
+      // Zapytanie zablokowane w całości, zanim model zaczął odpowiadać.
+      if (data.promptFeedback && data.promptFeedback.blockReason) {
+        console.error('Gemini zablokował zapytanie:', JSON.stringify(data.promptFeedback));
+        return res.json({
+          reply: `Gemini zablokował tę wiadomość swoimi filtrami bezpieczeństwa (powód: ${data.promptFeedback.blockReason}). Spróbuj przeformułować wiadomość.`,
+          proposals: [],
+          inconsistencies: [],
+          blocked: true,
+        });
+      }
 
-    // Zapisz nowe/zaktualizowane jednostki od razu do wspólnej bazy.
-    if (supabase && entities.length) {
-      const rows = entities
-        .filter((e) => e && e.name && e.name.trim())
-        .map((e) => ({
-          key: e.name.trim().toLowerCase(),
-          name: e.name.trim(),
-          kategoria: e.kategoria || null,
-          tajnosc: e.tajnosc || null,
-          opis: e.opis || null,
-          status: e.status || null,
-          powiazania: e.powiazania || null,
-          nadrzedna: e.nadrzedna || null,
-          updated_at: new Date().toISOString(),
-        }));
-      if (rows.length) {
-        const { error: upsertError } = await supabase.from('entities').upsert(rows, { onConflict: 'key' });
-        if (upsertError) console.error('Błąd zapisu jednostek do Supabase:', upsertError.message);
+      const candidate = data.candidates && data.candidates[0];
+      const content = candidate && candidate.content;
+      const parts = (content && content.parts) || [];
+      const finishReason = candidate && candidate.finishReason;
+
+      const functionCalls = parts.filter((p) => p.functionCall).map((p) => p.functionCall);
+      const textPieces = parts.filter((p) => typeof p.text === 'string' && p.text).map((p) => p.text);
+      if (textPieces.length) finalText += (finalText ? '\n' : '') + textPieces.join('');
+
+      if (!functionCalls.length) {
+        if (!finalText) finalText = describeFinishReason(finishReason);
+        break;
+      }
+
+      // Dopisz turę modelu tak, jak przyszła (z częściami functionCall) —
+      // wymagane, żeby kolejne zapytanie miało spójną historię.
+      workingContents.push({ role: 'model', parts });
+
+      const responseParts = [];
+      for (const fc of functionCalls) {
+        const result = await executeFunctionCall(fc, batchId);
+        if (result.kind === 'inconsistency') inconsistencies.push(result.text);
+        if (result.kind === 'proposal') proposals.push(result.proposal);
+        responseParts.push({ functionResponse: { name: fc.name, response: result.response } });
+      }
+      workingContents.push({ role: 'user', parts: responseParts });
+
+      if (iter === MAX_TOOL_ITERATIONS - 1 && !finalText) {
+        finalText = 'Wykonałem serię działań, ale nie zdążyłem sformułować podsumowania w tej turze — sprawdź zakładkę „Propozycje", zapisałem tam to, co zdążyłem zaproponować.';
       }
     }
 
     res.json({
-      reply: parsed.reply || '(brak treści odpowiedzi)',
-      entities,
-      inconsistencies: Array.isArray(parsed.inconsistencies) ? parsed.inconsistencies : [],
-      parseFailed,
-      // Gdy true: odpowiedź jest realna, ale niedokończona (ucięta na MAX_TOKENS
-      // nawet po automatycznych ponowieniach). Frontend powinien pokazać
-      // przycisk "Kontynuuj", który wyśle nową turę z prośbą o dociągnięcie
-      // dalszej części — patrz sekcja we frontendzie.
-      truncated,
+      reply: finalText || '(brak treści odpowiedzi)',
+      proposals,
+      inconsistencies,
     });
   } catch (err) {
     res.status(502).json({ error: 'Nie udało się połączyć z Gemini: ' + err.message });
   }
 }));
-
-// Próbuje wyciągnąć wartość string-owego pola (np. "reply") z uciętego,
-// niepoprawnego JSON-a — nawet jeśli string urwał się w połowie, bez
-// domykającego cudzysłowu. Zwraca odzyskany tekst + informację, czy string
-// zdążył się poprawnie domknąć.
-function extractPartialStringField(text, key) {
-  const marker = `"${key}"`;
-  const markerIdx = text.indexOf(marker);
-  if (markerIdx === -1) return null;
-
-  let i = text.indexOf(':', markerIdx + marker.length);
-  if (i === -1) return null;
-  i++;
-  while (i < text.length && /\s/.test(text[i])) i++;
-  if (text[i] !== '"') return null;
-  i++; // pomiń otwierający cudzysłów
-
-  let result = '';
-  let escape = false;
-  for (; i < text.length; i++) {
-    const ch = text[i];
-    if (escape) {
-      if (ch === 'n') result += '\n';
-      else if (ch === 't') result += '\t';
-      else if (ch === 'r') result += '\r';
-      else result += ch; // ", \\, /, itd.
-      escape = false;
-      continue;
-    }
-    if (ch === '\\') { escape = true; continue; }
-    if (ch === '"') return { text: result, complete: true };
-    result += ch;
-  }
-  return { text: result, complete: false }; // koniec tekstu bez domknięcia -> ucięte w połowie
-}
-
-// Próbuje wyciągnąć kompletne obiekty jednostek z tablicy "entities" wewnątrz
-// uciętego (niepoprawnego) JSON-a. Działa na zasadzie zliczania nawiasów
-// klamrowych, żeby złapać tylko te obiekty {...}, które model zdążył w pełni
-// domknąć przed przekroczeniem limitu tokenów.
-function salvageEntitiesFromTruncatedJson(text) {
-  const marker = '"entities"';
-  const idx = text.indexOf(marker);
-  if (idx === -1) return [];
-
-  const arrayStart = text.indexOf('[', idx);
-  if (arrayStart === -1) return [];
-
-  const results = [];
-  let i = arrayStart + 1;
-  while (i < text.length) {
-    while (i < text.length && /[\s,]/.test(text[i])) i++;
-    if (text[i] !== '{') break;
-
-    let depth = 0;
-    let inString = false;
-    let escape = false;
-    let objStart = i;
-    let objEnd = -1;
-
-    for (let j = i; j < text.length; j++) {
-      const ch = text[j];
-      if (inString) {
-        if (escape) escape = false;
-        else if (ch === '\\') escape = true;
-        else if (ch === '"') inString = false;
-        continue;
-      }
-      if (ch === '"') { inString = true; continue; }
-      if (ch === '{') depth++;
-      else if (ch === '}') {
-        depth--;
-        if (depth === 0) { objEnd = j; break; }
-      }
-    }
-
-    if (objEnd === -1) break; // obiekt ucięty w połowie — koniec odzyskiwania
-
-    const objText = text.slice(objStart, objEnd + 1);
-    try {
-      const obj = JSON.parse(objText);
-      if (obj && obj.name && String(obj.name).trim()) results.push(obj);
-    } catch { /* pomiń niepoprawny fragment */ }
-
-    i = objEnd + 1;
-  }
-
-  return results;
-}
 
 // Prosty health-check — przydatny dla Render, żeby wiedział, że usługa żyje
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
