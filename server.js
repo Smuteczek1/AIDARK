@@ -730,6 +730,64 @@ app.post('/api/chat', asyncRoute(async (req, res) => {
   }
 }));
 
+// ---------- Podsumowanie starszej części czatu (auto-czyszczenie po stronie klienta) ----------
+// Frontend, gdy lokalna historia czatu urośnie powyżej progu, wywołuje ten
+// endpoint z fragmentem starych wiadomości (+ ewentualnym poprzednim
+// podsumowaniem) i dostaje z powrotem jedno, krótkie podsumowanie, którym
+// zastępuje surowe wiadomości w widoku i w kontekście wysyłanym do /api/chat.
+// To osobne, jednorazowe zapytanie do Gemini (bez narzędzi, bez pętli).
+app.post('/api/chat/summarize', asyncRoute(async (req, res) => {
+  if (!process.env.GEMINI_API_KEY) {
+    return res.status(500).json({ error: 'Brak skonfigurowanego klucza GEMINI_API_KEY na serwerze.' });
+  }
+
+  const { previousSummary, segmentText } = req.body || {};
+  if (!segmentText || !String(segmentText).trim()) {
+    return res.status(400).json({ error: 'Brak treści do podsumowania.' });
+  }
+
+  const prompt = [
+    'Poniżej masz fragment rozmowy z archiwum uniwersum DARK oraz (opcjonalnie) dotychczasowe podsumowanie wcześniejszej części.',
+    'Zadanie: napisz JEDNO, zwięzłe, rzeczowe podsumowanie CAŁEJ rozmowy do tej pory po polsku (połącz stare podsumowanie z nowym fragmentem w spójną całość), 4-8 zdań, bez nagłówków, bez markdown, bez cytowania dosłownego — parafrazuj.',
+    'Fakty o jednostkach, dokumentach i kanonie świata są już trwale zapisane w osobnej bazie danych, więc ich NIE musisz powtarzać — skup się na przebiegu SAMEJ ROZMOWY: co ustalono w dialogu, jakie wątki są otwarte, na czym stanęliście, jakie pytania zadał archiwista i na co użytkownik jeszcze nie odpowiedział.',
+    '',
+    'Dotychczasowe podsumowanie:',
+    previousSummary && String(previousSummary).trim() ? String(previousSummary).trim() : '(brak — to pierwsze podsumowanie tej rozmowy)',
+    '',
+    'Nowy fragment rozmowy do włączenia:',
+    String(segmentText).trim(),
+  ].join('\n');
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${process.env.GEMINI_API_KEY}`;
+
+  try {
+    const { geminiResponse, data } = await callGeminiWithRetry(url, {
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: {
+        maxOutputTokens: 2048,
+        thinkingConfig: { thinkingLevel: 'low' },
+      },
+    }, 2);
+
+    if (!geminiResponse.ok) {
+      const msg = (data && data.error && data.error.message) || 'Błąd Gemini.';
+      return res.status(geminiResponse.status).json({ error: msg });
+    }
+
+    const candidate = data.candidates && data.candidates[0];
+    const parts = (candidate && candidate.content && candidate.content.parts) || [];
+    const summary = parts.filter((p) => typeof p.text === 'string').map((p) => p.text).join('').trim();
+
+    if (!summary) {
+      return res.status(502).json({ error: 'Nie udało się wygenerować podsumowania (pusta odpowiedź Gemini).' });
+    }
+
+    res.json({ summary });
+  } catch (err) {
+    res.status(502).json({ error: 'Nie udało się połączyć z Gemini: ' + err.message });
+  }
+}));
+
 // Prosty health-check — przydatny dla Render, żeby wiedział, że usługa żyje
 app.get('/healthz', (req, res) => res.status(200).send('ok'));
 
